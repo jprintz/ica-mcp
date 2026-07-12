@@ -12,10 +12,11 @@ Verktyg:
   delete_shopping_list  – radera en lista
   clear_checked         – ta bort alla avbockade varor
 
-Auth sköts av ica_client (OAuth via ims.icagruppen.se, token cachas i
-.ica_auth_state.json). Kräver svensk egress-IP (annars HTTP 451).
+Auth sköts av client.py (OAuth via ims.icagruppen.se, token cachas i en per-
+användare state-katalog). Kräver svensk egress-IP (annars HTTP 451).
 
-Kör:  .venv/bin/python server.py       (stdio — startas normalt av Claude Code)
+Kör:  ica-mcp serve   (eller: python -m ica_mcp)   — stdio, startas av MCP-klienten.
+Logga in en gång först med `ica-mcp login`.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import sys
 
 from mcp.server.fastmcp import FastMCP
 
-from ica_client import IcaClient, IcaError
+from .client import IcaClient, IcaError
 
 # Logga till stderr (stdout är reserverat för MCP-protokollet!)
 logging.basicConfig(level=logging.INFO, stream=sys.stderr,
@@ -176,5 +177,10 @@ def delete_shopping_list(list_name: str) -> str:
     return f"Raderade listan '{title}'."
 
 
-if __name__ == "__main__":
+def serve() -> None:
+    """Starta MCP-servern (stdio). Anropas av `ica-mcp serve`."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    serve()

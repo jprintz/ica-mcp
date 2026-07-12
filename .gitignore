@@ -4,3 +4,8 @@ __pycache__/
 .ica_auth_state.json
 sample_shoppinglists.json
 .env
+
+# packaging
+build/
+dist/
+*.egg-info/

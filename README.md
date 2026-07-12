@@ -42,50 +42,96 @@ language. Omitting a list name targets your primary list (`Handla`).
 
 ## Setup
 
+Everything is one `ica-mcp` command with four subcommands:
+
+| Command | What it does |
+|---|---|
+| `ica-mcp login` | Log in once (personnummer + password) and cache the session |
+| `ica-mcp register` | Register the server with Claude Code (`--scope user`) |
+| `ica-mcp status` | Show the cache location + whether the session is valid (no login) |
+| `ica-mcp serve` | Run the MCP server over stdio — what your client launches |
+
+### 1. Install
+
+The quickest path uses [uv](https://docs.astral.sh/uv/) — one command, identical
+on Windows, macOS and Linux:
+
+```bash
+# (only if you don't have uv yet)
+#   Windows:      winget install --id=astral-sh.uv -e
+#   macOS/Linux:  curl -LsSf https://astral.sh/uv/install.sh | sh
+
+uv tool install git+https://github.com/kanylbullen/ica-mcp
+uv tool update-shell      # puts `ica-mcp` on PATH — then open a NEW terminal
+```
+
+<details>
+<summary>Fallback without uv (plain pip + venv)</summary>
+
 ```bash
 git clone https://github.com/kanylbullen/ica-mcp.git
 cd ica-mcp
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv\Scripts\pip install .      # Windows
+.venv/bin/pip install .          # macOS / Linux
 ```
 
-### 1. First login (establishes a cached session)
+Then use the venv's `ica-mcp` in place of the bare command below:
+`.venv\Scripts\ica-mcp.exe` (Windows) or `.venv/bin/ica-mcp` (macOS/Linux).
+</details>
+
+### 2. Log in (once)
 
 ```bash
-export ICA_USER=YYMMDDXXXX          # your personnummer
-python auth_spike.py                # prompts for your password
+ica-mcp login          # prompts for personnummer + password (hidden)
 ```
 
-A successful run prints your shopping lists and writes `.ica_auth_state.json`
-(mode `0600`, git-ignored) containing the OAuth client + tokens. The short-lived
-access token (~15 min) is auto-refreshed via the long-lived refresh token, so you
-normally only log in once.
-
-### 2. Register with your MCP client
-
-**Claude Code:**
+On success it prints your name and lists and caches the session (OAuth client +
+tokens) in a **per-user state dir** — `%LOCALAPPDATA%\ica-mcp` (Windows),
+`~/.local/state/ica-mcp` (Linux), `~/Library/Application Support/ica-mcp` (macOS).
+The short-lived access token (~15 min) is auto-refreshed via the long-lived
+refresh token, so you normally log in only once. Verify anytime:
 
 ```bash
-claude mcp add ica -- /absolute/path/to/ica-mcp/.venv/bin/python /absolute/path/to/ica-mcp/server.py
+ica-mcp status         # cache path + session validity, without logging in
 ```
 
-**Or any MCP client** (`mcp.json`):
+### 3. Register with your MCP client
+
+**Claude Code** — let the CLI do it (writes at user scope, resolving the right path):
+
+```bash
+ica-mcp register
+```
+
+Registering at `--scope user` sidesteps a Windows drive-letter project-key quirk.
+If the `claude` CLI isn't found, `register` prints a ready-to-paste `mcp.json`.
+The equivalent manual command is:
+
+```bash
+claude mcp add ica --scope user -- ica-mcp serve
+```
+
+**Any other MCP client** (`mcp.json`):
 
 ```json
 {
   "mcpServers": {
     "ica": {
-      "command": "/absolute/path/to/ica-mcp/.venv/bin/python",
-      "args": ["/absolute/path/to/ica-mcp/server.py"]
+      "command": "ica-mcp",
+      "args": ["serve"]
     }
   }
 }
 ```
 
-The server reads its cached session from `.ica_auth_state.json` next to
-`server.py`, so it works without credentials in the environment. If the refresh
-token ever expires, set `ICA_USER` / `ICA_PASS` (see `.env.example`) so the server
-can re-authenticate on its own.
+If `ica-mcp` isn't on PATH, use the absolute path uv printed at install, or
+`python -m ica_mcp serve`.
+
+Restart your MCP client and the tools appear. The server reads the cached session,
+so it needs no credentials in its environment. If the refresh token ever expires,
+re-run `ica-mcp login` — or set `ICA_USER` / `ICA_PASS` (see `.env.example`) so
+`serve` can re-authenticate unattended. Relocate the cache with `ICA_STATE_FILE`.
 
 ## How authentication works
 
@@ -108,10 +154,15 @@ public in that project), not user secrets.
 
 ## Security & privacy
 
-- Your `.ica_auth_state.json` (tokens) and any exported data are git-ignored and
-  never leave your machine.
-- Credentials are read from the environment; nothing is logged to stdout (stdout
-  is reserved for the MCP protocol — logs go to stderr).
+- Tokens are cached in a per-user state dir (see *Log in*), outside the repo,
+  `chmod 0600` on POSIX. On **Windows** that only toggles the read-only bit, so
+  the file is not OS-ACL-protected there — treat the machine account as the
+  trust boundary. Set `ICA_STATE_FILE` to relocate the cache.
+- **No `keyring` dependency by design.** The Swedish-egress requirement pushes
+  many users onto headless homelab/VPS boxes that lack a Secret Service /
+  Credential Manager; a portable `0600` file is the deliberate choice.
+- Nothing is logged to stdout (stdout is reserved for the MCP protocol — logs go
+  to stderr).
 - This server can **modify your real ICA account** (add/remove items, delete
   lists). Write operations were validated against throwaway lists during
   development.

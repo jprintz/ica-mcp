@@ -1,3 +1,9 @@
+# Beroenden hanteras numera i pyproject.toml — installera helst med:
+#   uv tool install git+https://github.com/kanylbullen/ica-mcp
+#   (eller, i en venv:  pip install . )
+#
+# Den här filen finns kvar för plain-pip-fallback och speglar pyproject.
 requests>=2.31
-PyJWT>=2.8       # valfritt — bara för att läsa ut namnet ur id_token
-mcp>=1.2         # MCP-server (FastMCP)
+PyJWT>=2.8
+mcp>=1.2
+platformdirs>=4.0

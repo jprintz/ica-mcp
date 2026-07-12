@@ -1,5 +1,5 @@
 """
-ica_client.py — återanvändbar klient mot ICA:s inofficiella API.
+ica_mcp.client — återanvändbar klient mot ICA:s inofficiella API.
 
 Sköter hela auth-flödet (OAuth2/OIDC via Curity @ ims.icagruppen.se, med
 personnummer + lösenord utan BankID), token-cache + auto-refresh, samt
@@ -25,11 +25,13 @@ import logging
 import os
 import random
 import re
+import shutil
 import threading
 import uuid
 from os import urandom
 from urllib.parse import urlparse, parse_qs
 
+import platformdirs
 import requests
 
 try:
@@ -37,7 +39,7 @@ try:
 except ImportError:  # pragma: no cover
     jwt = None
 
-_LOG = logging.getLogger("ica_client")
+_LOG = logging.getLogger("ica_mcp.client")
 
 # --------------------------------------------------------------------------
 # Konstanter (verbatim från LazyTarget/ha-ica-todo)
@@ -63,9 +65,40 @@ USER_AGENT = (
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
 )
 
-DEFAULT_STATE_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".ica_auth_state.json"
-)
+LEGACY_STATE_NAME = ".ica_auth_state.json"
+
+
+def resolve_state_file() -> str:
+    """Var token-cachen ligger. Prioritet:
+      1. ICA_STATE_FILE (explicit override)
+      2. platformdirs user_state_dir('ica-mcp')/auth_state.json  (NON-roaming:
+         %LOCALAPPDATA% på Windows, ~/.local/state på Linux, Application Support
+         på macOS — så en långlivad refresh-token inte synkas mellan maskiner)
+    """
+    override = os.environ.get("ICA_STATE_FILE")
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return os.path.join(
+        platformdirs.user_state_dir("ica-mcp", appauthor=False), "auth_state.json"
+    )
+
+
+def _ensure_parent_dir(path: str) -> None:
+    """makedirs för filens katalog — no-op om path är ett naket filnamn (dirname
+    == '', vilket annars ger FileNotFoundError från os.makedirs)."""
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+
+
+def _legacy_state_candidates() -> list[str]:
+    """Gamla platser där .ica_auth_state.json kan ligga (för engångs-migrering)."""
+    here = os.path.dirname(os.path.abspath(__file__))          # ica_mcp/
+    return [
+        os.path.join(os.getcwd(), LEGACY_STATE_NAME),
+        os.path.join(here, LEGACY_STATE_NAME),                 # bredvid modulen
+        os.path.join(os.path.dirname(here), LEGACY_STATE_NAME),  # repo-roten (editable install)
+    ]
 
 
 class IcaError(RuntimeError):
@@ -92,13 +125,13 @@ class IcaClient:
         self,
         username: str | None = None,
         password: str | None = None,
-        state_file: str = DEFAULT_STATE_FILE,
+        state_file: str | None = None,
         user_agent: str | None = USER_AGENT,
         early_refresh_seconds: int = 60,
     ) -> None:
         self.username = username or os.environ.get("ICA_USER")
         self.password = password or os.environ.get("ICA_PASS")
-        self.state_file = state_file
+        self.state_file = state_file or resolve_state_file()
         self.early_refresh = early_refresh_seconds
         self.session = requests.Session()
         if user_agent:
@@ -107,7 +140,29 @@ class IcaClient:
         self._state = self._load_state()
 
     # ----------------------------------------------------------------- state
+    def _migrate_legacy_state(self) -> None:
+        """Kopiera (aldrig flytta) en gammal .ica_auth_state.json till den nya
+        platsen första gången, så att en uppgradering inte tappar inloggningen."""
+        if os.environ.get("ICA_STATE_FILE"):
+            return  # explicit override — rör inte
+        for legacy in _legacy_state_candidates():
+            if legacy == self.state_file or not os.path.isfile(legacy):
+                continue
+            try:
+                _ensure_parent_dir(self.state_file)
+                shutil.copyfile(legacy, self.state_file)
+                try:
+                    os.chmod(self.state_file, 0o600)
+                except OSError:
+                    pass
+                _LOG.info("Migrerade auth-state från %s → %s", legacy, self.state_file)
+            except OSError as e:
+                _LOG.warning("Kunde inte migrera %s: %s", legacy, e)
+            return
+
     def _load_state(self) -> dict:
+        if not os.path.exists(self.state_file):
+            self._migrate_legacy_state()
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, encoding="utf-8") as f:
@@ -118,9 +173,10 @@ class IcaClient:
 
     def _save_state(self) -> None:
         try:
+            _ensure_parent_dir(self.state_file)
             with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, ensure_ascii=False, indent=2)
-            os.chmod(self.state_file, 0o600)
+            os.chmod(self.state_file, 0o600)  # nära no-op på Windows (bara read-only-biten)
         except OSError as e:
             _LOG.warning("Kunde inte spara auth-state: %s", e)
 
@@ -159,8 +215,8 @@ class IcaClient:
     def _full_login(self) -> None:
         if not self.username or not self.password:
             raise IcaAuthError(
-                "Saknar inloggningsuppgifter (sätt ICA_USER/ICA_PASS) och "
-                "refresh gick inte att använda."
+                "Inte inloggad. Kör `ica-mcp login` i en terminal (eller sätt "
+                "ICA_USER/ICA_PASS i serverns miljö) och försök igen."
             )
         _LOG.info("Full inloggning …")
         # 1. bootstrap-token
@@ -267,6 +323,29 @@ class IcaClient:
         if not r.ok:
             raise IcaError(f"ICA {method} {path} → HTTP {r.status_code}: {(r.text or '')[:300]}")
         return r
+
+    # ---------------------------------------------------- auth (publikt)
+    def authenticate(self, force: bool = False) -> None:
+        """Se till att vi har en giltig session. force=True tvingar full
+        inloggning (kräver username/password); annars används cache/refresh och
+        full inloggning bara som sista utväg. Används av `ica-mcp login`."""
+        with self._lock:
+            if force:
+                self._full_login()
+            else:
+                self._access_token()
+
+    def token_status(self) -> dict:
+        """Offline-status om den cachade sessionen — gör INGEN nätverksanrop
+        och triggar ingen inloggning. Används av `ica-mcp status`."""
+        tok = self._state.get("token") or {}
+        return {
+            "state_file": self.state_file,
+            "exists": os.path.exists(self.state_file),
+            "access_valid": self._token_valid(tok),
+            "has_refresh": bool(tok.get("refresh_token")),
+            "expiry": tok.get("expiry"),
+        }
 
     # ---------------------------------------------------- konto/whoami
     def whoami(self) -> str | None:
