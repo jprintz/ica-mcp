@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+.ica_auth_state.json
+sample_shoppinglists.json
+.env
