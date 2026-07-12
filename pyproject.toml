@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ica-mcp"
+version = "0.2.0"
+description = "MCP server for ICA (Sweden's largest grocery chain) shopping lists"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "kanylbullen" }]
+keywords = ["mcp", "ica", "shopping-list", "model-context-protocol"]
+dependencies = [
+    "requests>=2.31",
+    "PyJWT>=2.8",       # läser namnet ur id_token
+    "mcp>=1.2",         # MCP-server (FastMCP)
+    "platformdirs>=4.0", # per-användare state-katalog (token-cache)
+]
+
+[project.urls]
+Homepage = "https://github.com/kanylbullen/ica-mcp"
+Repository = "https://github.com/kanylbullen/ica-mcp"
+
+[project.scripts]
+ica-mcp = "ica_mcp.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ica_mcp"]
