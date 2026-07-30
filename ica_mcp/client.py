@@ -123,6 +123,31 @@ def _ts() -> str:
     return _now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def normalize_personnummer(value: str | None) -> str | None:
+    """Returnera personnumret som 12 siffror, eller ``None``.
+
+    ICA:s authenticate-endpoint kräver sekelsiffror och svarar annars HTTP 400
+    utan förklaring — webbinloggningen lägger till dem åt användaren, så vi gör
+    detsamma. Skiljetecken tas bort så att ``780101-1234`` fungerar lika bra som
+    ``197801011234``.
+
+    Sekel härleds ur tvåsiffrigt år: ett år som ligger i framtiden tolkas som
+    1900-talet. Samordningsnummer (dag + 60) påverkas inte.
+    """
+    if value is None:
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if len(digits) == 12:
+        return digits
+    if len(digits) == 10:
+        yy = int(digits[:2])
+        current_yy = dt.date.today().year % 100
+        century = "20" if yy <= current_yy else "19"
+        return century + digits
+    # Låt övriga längder passera oförändrade — servern får avgöra.
+    return digits or None
+
+
 class IcaClient:
     """Trådsäker(ish) klient. En instans per konto."""
 
@@ -134,7 +159,7 @@ class IcaClient:
         user_agent: str | None = USER_AGENT,
         early_refresh_seconds: int = 60,
     ) -> None:
-        self.username = username or os.environ.get("ICA_USER")
+        self.username = normalize_personnummer(username or os.environ.get("ICA_USER"))
         self.password = password or os.environ.get("ICA_PASS")
         self.state_file = state_file or resolve_state_file()
         self.early_refresh = early_refresh_seconds
