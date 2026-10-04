@@ -92,6 +92,7 @@ def test_set_list_store_tool(monkeypatch):
 
 def test_set_list_store_is_annotated_as_write():
     import asyncio
+
     from ica_mcp.server import mcp
     tool = next(t for t in asyncio.run(mcp.list_tools()) if t.name == "set_list_store")
     assert tool.annotations.readOnlyHint is False and tool.annotations.destructiveHint is False

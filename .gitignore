@@ -12,3 +12,14 @@ dist/
 
 # tests
 .pytest_cache/
+
+# lockfile: `uv run --with .` creates one; the project is installed as a tool
+uv.lock
+
+# local agent config
+.claude/settings.local.json
+CLAUDE.local.md
+
+# tool caches
+.ruff_cache/
+.mypy_cache/

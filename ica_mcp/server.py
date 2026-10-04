@@ -44,8 +44,16 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from .client import (IcaClient, IcaError, Unit, apply_product, format_item, recipe_id_of,
-                     to_item, validate_barcode)
+from .client import (
+    IcaClient,
+    IcaError,
+    Unit,
+    apply_product,
+    format_item,
+    recipe_id_of,
+    to_item,
+    validate_barcode,
+)
 from .products import ARTICLE_GROUPS, CATEGORY_IDS, UNSPECIFIED, Category, ProductCatalog
 
 _LOG = logging.getLogger("ica_mcp")

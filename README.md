@@ -375,9 +375,15 @@ Known open items:
 ## Development
 
 ```bash
-pip install -e ".[test]"
-pytest
+pip install -e ".[dev]"          # pytest + ruff
+pytest -q
+ruff check ica_mcp tests         # the lint gate CI runs
 ```
+
+Conventions, hard rules and the definition of done for contributors and AI
+agents are in [AGENTS.md](AGENTS.md) (`CLAUDE.md` imports it). Repo-specific
+Claude Code skills live in `.claude/skills/` (`/live-check`, `/review`,
+`/release`).
 
 The suite (`tests/`, ~300 tests) runs offline against a mocked HTTP layer and
 fake clients: auth-state handling, ingredient aggregation and merging, product

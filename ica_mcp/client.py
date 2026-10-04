@@ -32,7 +32,7 @@ import unicodedata
 import uuid
 from os import urandom
 from typing import Literal, get_args
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import platformdirs
 import requests

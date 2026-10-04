@@ -1,5 +1,5 @@
 # Beroenden hanteras numera i pyproject.toml — installera helst med:
-#   uv tool install git+https://github.com/kanylbullen/ica-mcp
+#   uv tool install git+https://github.com/jprintz/ica-mcp
 #   (eller, i en venv:  pip install . )
 #
 # Den här filen finns kvar för plain-pip-fallback och speglar pyproject.

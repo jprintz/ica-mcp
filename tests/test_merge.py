@@ -4,8 +4,14 @@ för att skapa en dubblett, och receptandelarna förklarar varför (nätfritt)."
 import pytest
 
 from ica_mcp import server
-from ica_mcp.client import IcaClient, IcaError, merge_quantities, plan_additions, to_item
-from ica_mcp.client import _same_item  # noqa: PLC2701 — testas direkt
+from ica_mcp.client import (
+    IcaClient,
+    IcaError,
+    _same_item,  # noqa: PLC2701 — testas direkt
+    merge_quantities,
+    plan_additions,
+    to_item,
+)
 
 
 # ------------------------------------------------------------ mängder

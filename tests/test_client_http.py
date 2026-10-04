@@ -8,8 +8,8 @@ import hashlib
 import json
 
 import pytest
-
 from helpers import FakeResponse, valid_state
+
 from ica_mcp.client import (
     API_BASE,
     AUTHORIZE_ENDPOINT,
