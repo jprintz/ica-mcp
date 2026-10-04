@@ -103,3 +103,31 @@ def test_unknown_unit_share_has_no_quantity():
     assert vitlok["name"] == "vitlök (5 klyftor)" and vitlok["quantity"] is None
     assert vitlok["recipes"] == [{"id": 1, "quantity": 0.0}, {"id": 2, "quantity": 0.0}]
     assert salt["name"] == "en nypa salt" and salt["recipes"] == [{"id": 2, "quantity": 0.0}]
+
+
+
+def test_string_recipe_id_still_attributes():
+    vitlok, = IcaClient.aggregate_ingredients([_recipe("12", {"ingredient": "vitlök", "quantity": 1, "unit": "st"})])
+    assert vitlok["recipes"] == [{"id": 12, "quantity": 1.0, "unit": "st"}]
+    for bad in (None, "abc", True):
+        it, = IcaClient.aggregate_ingredients([_recipe(bad, {"ingredient": "vitlök"})])
+        assert "recipes" not in it
+
+
+def test_recipe_tool_falls_back_to_requested_id(monkeypatch):
+    class _C:
+        def get_recipe(self, rid):
+            return {"title": "Soppa", "ingredientGroups": [{"ingredients": [{"ingredient": "lök"}]}]}
+        def resolve_list(self, name):
+            return {"title": "Handla", "offlineId": "H"}
+        def link_products(self, items, suggestions=0):
+            return {"available": False, "linked": 0, "unlinked": [], "explicit": [], "fallback": []}
+        def add_rows(self, oid, items):
+            self.items = items
+        def add_or_merge(self, oid, items, merge=True):
+            self.items = items
+            return {"created": items, "merged": []}
+    c = _C()
+    monkeypatch.setattr(server, "client", lambda: c)
+    server.add_recipe_to_shopping_list(55)
+    assert c.items[0]["recipes"] == [{"id": 55, "quantity": 0.0}]

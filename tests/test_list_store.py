@@ -87,7 +87,7 @@ def test_set_list_store_tool(monkeypatch):
     msg = server.set_list_store("fest", "nära")
     assert c.posted[-1][1] == "F"
     assert c.posted[-1][2]["changedShoppingListProperties"]["sortingStore"] == 1234
-    assert "ICA Nära Hemma" in msg
+    assert "ICA Nära Hemma" in msg and "var: utan butik" in msg
 
 
 def test_set_list_store_is_annotated_as_write():
@@ -95,3 +95,34 @@ def test_set_list_store_is_annotated_as_write():
     from ica_mcp.server import mcp
     tool = next(t for t in asyncio.run(mcp.list_tools()) if t.name == "set_list_store")
     assert tool.annotations.readOnlyHint is False and tool.annotations.destructiveHint is False
+
+def test_default_store_lookup_failure_still_creates_list():
+    class _Down(_Fake):
+        def get_favorite_store_ids(self):
+            raise IcaError("HTTP 503")
+    assert _Down().store_id_for() == 0
+    with pytest.raises(IcaError):  # en uttryckligen angiven butik ska fortfarande ge fel
+        _Down(favorites=()).store_id_for("nära")
+
+
+def test_plan_dinners_notes_ignored_store_for_existing_list(monkeypatch):
+    from ica_mcp import server
+    c = _Fake(lists=[{"title": "Veckans middagar", "offlineId": "X"}])
+    c.get_random_recipes = lambda n: [{"id": 1, "title": "Soppa", "ingredientGroups": []}]
+    c.add_rows = lambda oid, items: None
+    c.add_or_merge = lambda oid, items, merge=True: {"created": items, "merged": []}
+    monkeypatch.setattr(server, "client", lambda: c)
+    out = server.plan_dinners(1, store_name="Willys")
+    assert "oförändrad" in out["note"]
+    assert not [m for m, *_ in c.posted if m == "POST"]  # ingen ny lista skapades
+    assert "note" not in server.plan_dinners(1)  # ingen store_name → ingen anmärkning
+
+
+def test_set_list_store_reports_previous_store_and_skips_noop(monkeypatch):
+    from ica_mcp import server
+    c = _SyncRecorder(lists=[{"title": "Handla", "offlineId": "H", "sortingStore": 9713}])
+    c.get_store = lambda sid: {"id": sid, "marketingName": "Maxi ICA Stormarknad Partille"}
+    monkeypatch.setattr(server, "_client", c)
+    assert "redan kopplad" in server.set_list_store(None, "maxi") and c.posted == []
+    msg = server.set_list_store(None, "nära")
+    assert "var: Maxi ICA Stormarknad Partille" in msg and len(c.posted) == 1

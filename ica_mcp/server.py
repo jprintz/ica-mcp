@@ -44,7 +44,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from .client import IcaClient, IcaError, Unit, format_item, to_item, validate_barcode
+from .client import (IcaClient, IcaError, Unit, apply_product, format_item, recipe_id_of,
+                     to_item, validate_barcode)
 from .products import ARTICLE_GROUPS, CATEGORY_IDS, UNSPECIFIED, Category, ProductCatalog
 
 # Logga till stderr (stdout är reserverat för MCP-protokollet!)
@@ -103,15 +104,25 @@ def _only_new(res: dict, added: dict) -> dict:
     return {**res, "unlinked": [u for u in res["unlinked"] if u["name"] in keep]}
 
 
+def _linked_as(entries: list[dict]) -> str:
+    """'diskmedel → smör (Mejeri), …' för kopplingar som namnet inte styrker."""
+    return ", ".join(f"{e['name']} → {e['product']['name']} "
+                     f"({ARTICLE_GROUPS.get(e['product'].get('parentId'), 'okänd avdelning')})"
+                     for e in entries)
+
+
 def _link_note(res: dict) -> str:
     """Rapport till LLM:en om varor som inte kopplades till en ICA-produkt.
-    Utan category hamnar de under Ospecificerad i appen."""
+    Utan category hamnar de under Ospecificerad i appen. Kopplingar via
+    product_id redovisas också, så att ett felaktigt id syns."""
     if not res["available"]:
         return ("\nProduktregistret kunde inte hämtas just nu, så varorna lades till "
                 "som fritext; de utan category hamnar under Ospecificerad.")
     unsorted = [u for u in res["unlinked"] if not u.get("category")]
     sorted_ = [u for u in res["unlinked"] if u.get("category")]
     note = ""
+    if res.get("explicit"):
+        note += "\nKopplade via product_id: " + _linked_as(res["explicit"]) + "."
     if sorted_:
         note += ("\nFritext i vald avdelning: "
                  + ", ".join(f"{u['name']} ({u['category']})" for u in sorted_) + ".")
@@ -198,9 +209,10 @@ def add_items(items: list[Item], list_name: str | None = None, merge: bool = Tru
     Varor kopplas till ICA:s produktregister vid exakt namnträff ('mjölk',
     'krossade tomater') och sorteras då i rätt avdelning. Övriga läggs till som
     fritext i angiven category, annars under Ospecificerad — de listas i svaret
-    med förslag och kan sorteras med link_item. En vara som redan finns på
-    listan (ej avbockad) får sin mängd ökad i stället för en ny rad; merge=False
-    ger alltid nya rader. Utelämna list_name för den primära listan."""
+    med förslag och kan sorteras med link_item. En produktträff (på namn eller
+    product_id) går före category. En vara som redan finns på listan (ej
+    avbockad) får sin mängd ökad i stället för en ny rad; merge=False ger
+    alltid nya rader. Utelämna list_name för den primära listan."""
     parsed = [to_item(i.model_dump()) for i in items]
     parsed = [i for i in parsed if i["name"]]
     if not parsed:
@@ -234,9 +246,7 @@ def link_item(item: str, product_id: int | None = None, category: Category | Non
             raise IcaError(f"Okänd produkt {product_id} (eller produktregistret kunde "
                            "inte hämtas). Sök med search_products.")
         for r in rows:
-            r["sourceId"] = p["id"]
-            r["articleGroupId"] = p["parentId"]
-            r["articleGroupIdExtended"] = p.get("parentIdExtended") or p["parentId"]
+            apply_product(r, p)
         where = f"ICA-produkten {p['name']} ({ARTICLE_GROUPS.get(p['parentId'], 'okänd avdelning')})"
     else:
         for r in rows:
@@ -330,8 +340,19 @@ def set_list_store(list_name: str | None = None, store_name: str | None = None) 
     c = client()
     L = c.resolve_list(list_name)
     store = c.resolve_store(store_name)
+    new = store.get("name") or store["id"]
+    old_id = L.get("sortingStore") or 0
+    if int(old_id) == int(store["id"]):
+        return f"Listan '{L.get('title')}' är redan kopplad till {new}."
     c.set_list_store(L["offlineId"], store["id"])
-    return f"Listan '{L.get('title')}' är nu kopplad till {store.get('name') or store['id']}."
+    if not old_id:
+        was = "utan butik"
+    else:
+        try:
+            was = c.get_store(old_id).get("marketingName") or f"butik {old_id}"
+        except IcaError:
+            was = f"butik {old_id}"
+    return f"Listan '{L.get('title')}' är nu kopplad till {new} (var: {was})."
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -387,6 +408,9 @@ def _recipe_link_note(res: dict, items: list[dict]) -> str:
         return (" Produktregistret kunde inte hämtas, så ingredienserna lades till "
                 "som fritext under Ospecificerad.")
     note = f" {res['linked']} av {len(items)} kopplade till ICA-produkter."
+    if res.get("fallback"):
+        note += (" Kopplade bara via receptets ingrediens-id (kan vara för grovt, rätta "
+                 "med link_item): " + _linked_as(res["fallback"]) + ".")
     if res["unlinked"]:
         note += (" Under Ospecificerad: " + ", ".join(u["name"] for u in res["unlinked"])
                  + ". " + _SORT_HINT)
@@ -400,6 +424,8 @@ def add_recipe_to_shopping_list(recipe_id: int, list_name: str | None = None) ->
     från recept" på varje vara. Utelämna list_name för primärlistan."""
     c = client()
     recipe = c.get_recipe(recipe_id)
+    if recipe_id_of(recipe) is None:  # saknas/oläsbart id → det vi bad om
+        recipe = {**recipe, "id": recipe_id}
     items = IcaClient.aggregate_ingredients([recipe])
     if not items:
         return f"Receptet '{recipe.get('title')}' saknar ingredienser."
@@ -500,7 +526,9 @@ def add_product_to_shopping_list(ean: str, list_name: str | None = None,
     L = c.resolve_list(list_name)
     # behåll produktens namn ('Färsk mellanmjölk Arla Ko®') men koppla till
     # registrets generiska produkt (articleId, t.ex. 'mellanmjölk')
-    item = to_item({"name": p["name"], "product_id": p.get("articleId")})
+    # avdelningen från streckkodsuppslaget gäller om produkten inte hittas i registret
+    item = to_item({"name": p["name"], "product_id": p.get("articleId"),
+                    "category": ARTICLE_GROUPS.get(p.get("articleGroupId"))})
     res = c.link_products([item], suggestions=0)
     added = c.add_or_merge(L["offlineId"], [item], merge=merge)
     if added["merged"]:
@@ -578,10 +606,14 @@ def plan_dinners(count: int = 5, list_name: str | None = None,
     if not recipes:
         return {"error": "Kunde inte hämta recept."}
     items = IcaClient.aggregate_ingredients(recipes)
-    L = c.resolve_or_create_list(list_name or "Veckans middagar", store_name)
+    name = list_name or "Veckans middagar"
+    # store_name gäller bara en ny lista — säg till om den inte användes
+    existed = bool(store_name) and any(
+        L.get("title", "").lower() == name.strip().lower() for L in c.get_lists())
+    L = c.resolve_or_create_list(name, store_name)
     res = c.link_products(items, suggestions=0)
     added = c.add_or_merge(L["offlineId"], items)
-    return {
+    out = {
         "list": L.get("title"),
         "dinners": [{"id": r.get("id"), "title": r.get("title"),
                      "cookingTime": r.get("cookingTime")} for r in recipes],
@@ -590,6 +622,10 @@ def plan_dinners(count: int = 5, list_name: str | None = None,
         "merged_into_existing_rows": [m["after"] for m in added["merged"]],
         "linked_to_ica_products": res["linked"],
     }
+    if existed:
+        out["note"] = (f"Listan '{L.get('title')}' fanns redan, så store_name användes "
+                       "inte — listans butik är oförändrad. Byt med set_list_store.")
+    return out
 
 
 def serve() -> None:
