@@ -118,7 +118,7 @@ def test_delete_shopping_list_requires_exact(monkeypatch):
 
 READ = {"list_shopping_lists", "view_shopping_list", "list_saved_recipes", "get_recipe",
         "random_recipes", "list_stores", "get_offers", "get_bonus", "get_product",
-        "offers_on_my_list"}
+        "offers_on_my_list", "search_products"}
 DESTRUCTIVE = {"delete_shopping_list", "remove_item", "clear_checked"}
 
 
