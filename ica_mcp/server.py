@@ -8,7 +8,7 @@ Verktyg:
   add_items             – lägg till varor (namn, mängd, enhet) på en lista
   check_off / uncheck   – bocka av / ångra en vara
   remove_item           – ta bort en vara helt
-  create_shopping_list  – skapa ny lista
+  create_shopping_list  – skapa ny lista (kopplad till en butik)
   delete_shopping_list  – radera en lista
   clear_checked         – ta bort alla avbockade varor
   list_saved_recipes    – dina favoritrecept
@@ -195,11 +195,20 @@ def clear_checked(list_name: str | None = None) -> str:
     return f"Rensade {len(struck)} avbockade varor från '{fresh.get('title')}'."
 
 
+def _store_note(L: dict) -> str:
+    sid = L.get("sortingStore")
+    return (f" (butik {sid})" if sid else
+            " (utan butik: lägg till en favoritbutik i ICA-appen för att få kategorier)")
+
+
 @mcp.tool(annotations=WRITE)
-def create_shopping_list(title: str) -> str:
-    """Skapa en ny inköpslista med angiven titel."""
-    L = client().create_list(title)
-    return f"Skapade listan '{L.get('title')}'."
+def create_shopping_list(title: str, store_name: str | None = None) -> str:
+    """Skapa en ny inköpslista med angiven titel, kopplad till en butik (krävs
+    för att ICA-appen ska visa kategorier). store_name matchas mot dina
+    favoritbutiker; utelämna för din primära butik."""
+    c = client()
+    L = c.create_list(title, store_id=c.store_id_for(store_name))
+    return f"Skapade listan '{L.get('title')}'{_store_note(L)}."
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -393,17 +402,19 @@ def add_recipes_to_shopping_list(recipe_ids: list[int],
 
 
 @mcp.tool(annotations=WRITE)
-def plan_dinners(count: int = 5, list_name: str | None = None) -> dict:
+def plan_dinners(count: int = 5, list_name: str | None = None,
+                 store_name: str | None = None) -> dict:
     """Planera veckans middagar: hämtar `count` slumprecept (1–10), slår ihop
     deras ingredienser och lägger på en lista (skapar 'Veckans middagar' om
-    list_name utelämnas). Returnerar menyn."""
+    list_name utelämnas). En ny lista kopplas till store_name (favoritbutik)
+    eller din primära butik. Returnerar menyn."""
     count = max(1, min(int(count), 10))
     c = client()
     recipes = c.get_random_recipes(count)
     if not recipes:
         return {"error": "Kunde inte hämta recept."}
     items = IcaClient.aggregate_ingredients(recipes)
-    L = c.resolve_or_create_list(list_name or "Veckans middagar")
+    L = c.resolve_or_create_list(list_name or "Veckans middagar", store_name)
     c.add_rows(L["offlineId"], items)
     return {
         "list": L.get("title"),

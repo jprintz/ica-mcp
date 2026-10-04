@@ -459,10 +459,12 @@ class IcaClient:
     def get_list_raw(self, offline_id: str) -> dict:
         return self._api("GET", f"{SL_PATH}/{offline_id}").json()
 
-    def create_list(self, title: str, comment: str = "") -> dict:
+    def create_list(self, title: str, comment: str = "", store_id: int = 0) -> dict:
+        """Skapa en lista. store_id (sortingStore) kopplar listan till en butik;
+        utan butik visar ICA-appen inga kategorier. Se store_id_for."""
         offline_id = str(uuid.uuid4()).upper()
         body = {"offlineId": offline_id, "title": title, "commentText": comment,
-                "sortingStore": 0, "rows": [], "latestChange": _ts()}
+                "sortingStore": int(store_id or 0), "rows": [], "latestChange": _ts()}
         self._api("POST", SL_PATH, body)
         return self.get_list_raw(offline_id)
 
@@ -541,13 +543,14 @@ class IcaClient:
             raise IcaError(f"Flera listor matchar {ref!r}: {[L['title'] for L in sub]}")
         raise IcaError(f"Ingen lista matchar {ref!r}. Dina listor: {[L['title'] for L in lists]}")
 
-    def resolve_or_create_list(self, name: str) -> dict:
-        """Hitta en lista med exakt titel, annars skapa en ny med det namnet."""
+    def resolve_or_create_list(self, name: str, store_ref=None) -> dict:
+        """Hitta en lista med exakt titel, annars skapa en ny med det namnet,
+        kopplad till butiken store_ref (se store_id_for)."""
         low = name.strip().lower()
         for L in self.get_lists():
             if L.get("title", "").lower() == low:
                 return L
-        return self.create_list(name)
+        return self.create_list(name, store_id=self.store_id_for(store_ref))
 
     @staticmethod
     def match_rows(list_obj: dict, item: str, unstruck_only: bool = False) -> list[dict]:
@@ -650,6 +653,14 @@ class IcaClient:
             except IcaError:
                 out.append({"id": sid, "name": None, "city": None})
         return out
+
+    def store_id_for(self, ref=None) -> int:
+        """Butiks-id för en ny lista: favoritbutiken ref (id eller namn), annars
+        den primära (första favoriten). 0 = ingen butik (inga favoritbutiker)."""
+        if ref is None or str(ref).strip() == "":
+            ids = self.get_favorite_store_ids()
+            return int(ids[0]) if ids else 0
+        return int(self.resolve_store(ref)["id"])
 
     def resolve_store(self, ref=None) -> dict:
         """Hitta en favoritbutik via id eller namn. None = primär (första favoriten)."""
