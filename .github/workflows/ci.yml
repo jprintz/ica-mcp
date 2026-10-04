@@ -6,6 +6,19 @@ on:
   pull_request:
 
 jobs:
+  # Lint-grinden (ruff, regler i pyproject.toml). Formatteraren körs inte här.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install ruff
+      - name: ruff check
+        run: ruff check --output-format github ica_mcp tests
+
   test:
     runs-on: ubuntu-latest
     strategy:

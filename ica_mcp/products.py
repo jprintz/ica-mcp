@@ -25,11 +25,12 @@ import difflib
 import json
 import logging
 import os
-import tempfile
 import re
+import tempfile
 import threading
 import unicodedata
-from typing import Callable, Literal, get_args
+from collections.abc import Callable
+from typing import Literal, get_args
 
 import platformdirs
 
@@ -42,7 +43,7 @@ ARTICLES_PATH = "sverige/digx/mobile/shoppinglistservice/v1/articles"
 # matchar en produkt får 12 = Ospecificerad, om man inte anger en själv.
 Category = Literal["Bröd, kex och bageri", "Frukt & Grönt", "Djupfryst", "Färskvaror",
                    "Hälsa & Skönhet", "Kassa", "Skafferivaror", "Mejeri", "Hem & Fritid"]
-CATEGORY_IDS: dict[str, int] = dict(zip(get_args(Category), (3, 4, 5, 6, 7, 8, 9, 10, 11)))
+CATEGORY_IDS: dict[str, int] = dict(zip(get_args(Category), (3, 4, 5, 6, 7, 8, 9, 10, 11), strict=True))
 UNSPECIFIED = 12
 ARTICLE_GROUPS: dict[int, str] = {**{v: k for k, v in CATEGORY_IDS.items()},
                                   UNSPECIFIED: "Ospecificerad"}

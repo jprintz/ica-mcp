@@ -1,0 +1,57 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pytest)",
+      "Bash(pytest *)",
+      "Bash(.venv/bin/python -m pytest *)",
+      "Bash(python -m pytest *)",
+      "Bash(python3 -m pytest *)",
+      "Bash(uv run pytest *)",
+      "Bash(ruff *)",
+      "Bash(.venv/bin/ruff *)",
+      "Bash(uvx ruff *)",
+      "Bash(python -m compileall *)",
+      "Bash(git status)",
+      "Bash(git status *)",
+      "Bash(git diff)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git branch)",
+      "Bash(git branch -a)",
+      "Bash(git branch -vv)",
+      "Bash(gh pr list *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh run list *)",
+      "Bash(gh run view *)",
+      "Bash(gh api user *)"
+    ],
+    "deny": [
+      "Read(~/Library/Application Support/ica-mcp/**)",
+      "Read(~/.local/state/ica-mcp/**)",
+      "Read(./.env)",
+      "Read(./.ica_auth_state.json)",
+      "Bash(ica-mcp login*)",
+      "Bash(.venv/bin/ica-mcp login*)",
+      "Bash(python -m ica_mcp login*)",
+      "Bash(.venv/bin/python -m ica_mcp login*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/ruff-check.sh",
+            "timeout": 30,
+            "statusMessage": "ruff"
+          }
+        ]
+      }
+    ]
+  }
+}

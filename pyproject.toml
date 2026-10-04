@@ -20,10 +20,12 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.urls]
-Homepage = "https://github.com/kanylbullen/ica-mcp"
-Repository = "https://github.com/kanylbullen/ica-mcp"
+Homepage = "https://github.com/jprintz/ica-mcp"
+Repository = "https://github.com/jprintz/ica-mcp"
+Upstream = "https://github.com/kanylbullen/ica-mcp"
 
 [project.scripts]
 ica-mcp = "ica_mcp.cli:main"
@@ -37,3 +39,16 @@ pythonpath = ["tests"]
 
 [tool.hatch.version]
 path = "ica_mcp/__init__.py"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+# Lint only; the formatter is not enforced (the code predates ruff and is
+# hand-wrapped). E501 is off for the same reason — keep new lines <= 110.
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ica_mcp"]
