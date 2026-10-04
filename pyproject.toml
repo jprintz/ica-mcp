@@ -14,7 +14,7 @@ keywords = ["mcp", "ica", "shopping-list", "model-context-protocol"]
 dependencies = [
     "requests>=2.31",
     "PyJWT>=2.8",       # läser namnet ur id_token
-    "mcp>=1.7,<2",         # MCP-server (FastMCP)
+    "mcp>=1.14,<2",         # MCP-server (FastMCP)
     "platformdirs>=4.0", # per-användare state-katalog (token-cache)
 ]
 
