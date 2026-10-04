@@ -23,7 +23,7 @@ The server **modifies a real account**. Treat every write path as production.
 | `ica_mcp/server.py` | The MCP tools. Thin: resolve names → call the client → return a short Swedish reply. Every tool carries a `READ`, `WRITE` or `DESTRUCTIVE` annotation. |
 | `ica_mcp/cli.py` | `ica-mcp serve \| login \| status \| register`. `login` is separate because a password prompt cannot run over the stdio transport. |
 | `tests/` | Offline only. `tests/helpers.py` has `FakeSession`/`FakeResponse`; `conftest.py` has the `make_client` fixture (explicit state file in `tmp_path`, env cleared). |
-| `.github/workflows/` | `ci.yml` (lint + tests on 3.10–3.13 + lowest `mcp`), `release.yml` (PyPI on GitHub Release, see Releases). |
+| `.github/workflows/` | `ci.yml`: lint, tests on 3.10–3.13, and tests against the lowest supported `mcp`. There is no publish workflow; the fork is installed from git. |
 
 Module docstrings hold facts verified against ICA, with a date (see the top of
 `products.py` and `client.py`). When you learn something about the API
@@ -119,7 +119,7 @@ verification** below.
 - **Reviews.** Use the checklist in `.claude/skills/review/SKILL.md`.
 - **Releases.** See `.claude/skills/release/SKILL.md`. Short version: bump
   `__version__` in `ica_mcp/__init__.py`, merge to `main`, tag `vX.Y.Z`,
-  publish a GitHub Release. Note the PyPI caveat in that skill before tagging.
+  create a GitHub Release. Not published to PyPI.
 
 ## Runtime locations
 
@@ -135,7 +135,6 @@ verification** below.
   without prompts; denies reading the token cache and `.env`; runs `ruff` on
   every Python file an agent edits and feeds violations back.
 - `.claude/skills/`: `live-check` (manual end-to-end protocol), `review`
-  (repo-specific review checklist), `release` (release steps and the PyPI
-  situation).
+  (repo-specific review checklist), `release` (git-only release steps).
 - `CLAUDE.local.md` (not committed): machine- and owner-specific notes such as
   which GitHub account to use. Create your own if you need one.
