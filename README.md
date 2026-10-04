@@ -28,7 +28,7 @@ BankID required for accounts that support password login).
 | `check_off` / `uncheck` | Mark an item bought / undo |
 | `remove_item` | Remove an item entirely |
 | `clear_checked` | Remove all checked items (tidy up after shopping) |
-| `create_shopping_list` / `delete_shopping_list` | Create / delete a list |
+| `create_shopping_list` / `delete_shopping_list` | Create / delete a list. New lists are linked to your primary favourite store (or `store_name`); the ICA app only shows categories for lists with a store |
 | `list_saved_recipes` / `get_recipe` | Your favourite recipes; one recipe's ingredients + steps |
 | `random_recipes` | Random recipes for inspiration |
 | `add_recipe_to_shopping_list` | Add a recipe's ingredients to a list, with their quantities and units |
