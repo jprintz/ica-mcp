@@ -7,7 +7,20 @@ on:
     types: [published]
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (with test extras)
+        run: pip install ".[test]"
+      - name: Unit tests
+        run: pytest -q
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,6 +31,17 @@ jobs:
         run: |
           pip install build
           python -m build
+      - name: Verify release tag matches built version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG#v}"
+          ls -1 dist/
+          if ! ls dist/ica_mcp-"$VERSION"-*.whl >/dev/null 2>&1 \
+             || [ ! -f "dist/ica_mcp-$VERSION.tar.gz" ]; then
+            echo "::error::Release tag '$TAG' (version '$VERSION') does not match the built artifacts in dist/. Fix the version or the tag before releasing."
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: dist
