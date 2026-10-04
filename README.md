@@ -78,12 +78,17 @@ that row instead of creating a duplicate, like the ICA app does when you add
 an item by hand. This applies to `add_items`, the recipe tools, `plan_dinners`
 and barcodes:
 
-- The same item means the same catalogue product, or the same name when
-  either side isn't linked.
+- The same item means the same name (ignoring case, spacing and Unicode form),
+  or two different names linked to the same catalogue product. Links that are
+  only approximate never merge different names: a recipe's coarse ingredient
+  id ("körsbärstomater på burk" → tomat), an amount kept in the name
+  ("vitlök (3 klyftor)"), or a row whose name doesn't match its product.
 - Amounts are converted within volume (`krm`, `tsk`, `msk`, `ml`, `cl`, `dl`,
-  `l`) and weight (`g`, `hg`, `kg`), and the sum is shown in the larger unit:
-  2 msk + 1 dl olja = 1.3 dl. Units that don't convert (`st` and `g`) stay on
+  `l`) and weight (`g`, `hg`, `kg`). The sum is shown in the larger unit when
+  it is exact there (2 msk + 1 dl olja = 1,3 dl), otherwise in the smaller one
+  (1 tsk + 1 msk = 4 tsk). Units that don't convert (`st` and `g`) stay on
   separate rows.
+- Pass `merge=False` to `add_items` or the barcode tool to always add a new row.
 - Recipe shares are added to the row's *Tillagd från recept*, so the app still
   shows how much each recipe needs.
 - The reply lists which rows were increased.

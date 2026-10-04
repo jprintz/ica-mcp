@@ -14,7 +14,10 @@ from ica_mcp.client import _same_item  # noqa: PLC2701 — testas direkt
     ((2, "dl"), (100, "ml"), (3, "dl")),          # större enheten vinner
     ((100, "ml"), (2, "dl"), (3, "dl")),
     ((2, "msk"), (1, "dl"), (1.3, "dl")),
-    ((1, "tsk"), (1, "msk"), (1.33, "msk")),
+    ((1, "tsk"), (1, "msk"), (4, "tsk")),         # 1,33 msk vore avrundat → mindre enheten
+    ((1, "kg"), (5, "g"), (1.005, "kg")),         # små tillägg försvinner inte
+    ((2, "l"), (1, "tsk"), (2.005, "l")),
+    ((1, "kg"), (0.5, "g"), (1000.5, "g")),
     ((500, "g"), (1, "kg"), (1.5, "kg")),
     ((2, "hg"), (50, "g"), (2.5, "hg")),
     ((None, None), (1, "tsk"), (1, "tsk")),       # mängd saknas på ena sidan
@@ -85,7 +88,8 @@ def test_merges_into_existing_row_and_reports():
     (row,) = changed
     assert (row["offlineId"], row["quantity"], row["unit"]) == ("A", 2.0, "l")
     assert row["id"] == 1 and row["internalOrder"] == 0  # hela raden skickas
-    assert merges == [{"name": "mjölk", "before": "1 l mjölk", "after": "2 l mjölk"}]
+    assert merges == [{"name": "mjölk", "before": "1 l mjölk", "after": "2 l mjölk",
+                       "items": ["mjölk"], "unsorted": False}]
     assert rows[0]["quantity"] == 1.0  # originalet orört
 
 
@@ -229,7 +233,8 @@ def test_unchanged_row_is_not_written():
     rows = [_row("gräddfil", "A", 1.5, "dl", src=10565, grp=10)]
     new, changed, merges = plan_additions(rows, [_it("Gräddfil Arla Ko", product=_p(10565))])
     assert new == [] and changed == []
-    assert merges == [{"name": "gräddfil", "before": "1,5 dl gräddfil", "after": "1,5 dl gräddfil"}]
+    assert merges == [{"name": "gräddfil", "before": "1,5 dl gräddfil", "after": "1,5 dl gräddfil",
+                       "items": ["Gräddfil Arla Ko"], "unsorted": False}]
     c = _Fake(rows)
     out = c.add_or_merge("H", [{"name": "Gräddfil Arla Ko", "product": _p(10565)}])
     assert c.synced == [] and out["merged"]  # inget anrop alls
@@ -256,3 +261,140 @@ def test_amount_in_name_is_not_merged_by_product():
     new, changed, merges = plan_additions(rows, [item])
     assert [i["name"] for i in new] == ["vitlök (3 klyftor)"]
     assert changed == [] and merges == []
+
+
+# ------------------------------------------------------------ pålitliga kopplingar
+class _Catalog:
+    """Minimal ProductCatalog: match() på exakt namn."""
+    def __init__(self, names):
+        self.names = names
+
+    def match(self, name):
+        pid = self.names.get(" ".join(str(name).lower().split()))
+        return {"id": pid} if pid else None
+
+
+def test_fallback_link_does_not_merge_into_other_name():
+    # recensionens scenario A: 'körsbärstomater på burk' fick tomatens id via ingredientId
+    rows = [_row("tomater", "A", 4, None, src=11706, grp=4)]
+    item = {**_it("körsbärstomater på burk", 2, "st", product=_p(11706)), "weak_link": True}
+    new, changed, merges = plan_additions(rows, [item], _Catalog({"tomater": 11706}))
+    assert [i["name"] for i in new] == ["körsbärstomater på burk"] and changed == [] and merges == []
+
+
+def test_fallback_link_does_not_merge_within_one_call():
+    # scenario B: båda raderna i samma recept
+    a = _it("tomater", 4, "st", product=_p(11706))
+    b = {**_it("körsbärstomater på burk", 2, "st", product=_p(11706)), "weak_link": True}
+    new, _, merges = plan_additions([], [a, b])
+    assert [i["name"] for i in new] == ["tomater", "körsbärstomater på burk"] and merges == []
+
+
+def test_row_linked_by_fallback_does_not_swallow_other_name():
+    # en äldre rad som kopplades via ingredientId: radens namn matchar inte produkten
+    rows = [_row("körsbärstomater på burk", "A", 2, None, src=11706, grp=4)]
+    new, changed, _ = plan_additions(rows, [_it("tomater", 4, "st", product=_p(11706))],
+                                     _Catalog({"tomater": 11706}))
+    assert [i["name"] for i in new] == ["tomater"] and changed == []
+
+
+def test_trusted_links_with_other_names_still_merge_with_catalog():
+    rows = [_row("vitlöksklyfta", "A", 1.0, "st", src=11802, grp=4)]
+    _, (row,), _ = plan_additions(rows, [_it("pressade vitlöksklyftor", 2, "st", product=_p(11802))],
+                                  _Catalog({"vitlöksklyfta": 11802}))
+    assert row["quantity"] == 3.0
+
+
+def test_fallback_link_with_same_name_still_merges():
+    rows = [_row("körsbärstomater på burk", "A", 1, "st")]
+    item = {**_it("körsbärstomater på burk", 2, "st", product=_p(11706)), "weak_link": True}
+    _, (row,), _ = plan_additions(rows, [item])
+    assert row["quantity"] == 3.0
+
+
+def test_link_flags_survive_to_item():
+    from ica_mcp.client import to_item
+    it = to_item({"name": "x", "weak_link": True, "amount_in_name": True})
+    assert it["weak_link"] is True and it["amount_in_name"] is True
+    assert "weak_link" not in to_item({"name": "x", "weak_link": "yes"})
+
+
+def test_names_match_across_unicode_forms():
+    import unicodedata
+    nfd = unicodedata.normalize("NFD", "mjölk")
+    assert nfd != "mjölk" and _same_item({"name": nfd}, {"name": "MJÖLK"})
+
+
+@pytest.mark.parametrize("shares", [[{"quantity": 1}], [{"id": 7, "quantity": None}], ["x"]])
+def test_odd_server_shares_do_not_crash(shares):
+    rows = [_row("mjölk", "A", 1, "l", recipes=shares)]
+    _, (row,), _ = plan_additions(rows, [_it("mjölk", 1, "l")])
+    assert row["quantity"] == 2.0
+    assert all(isinstance(s, dict) and s.get("id") for s in row["recipes"])
+
+
+def test_merge_into_unsorted_row_is_flagged():
+    rows = [_row("swiffer thing", "A", grp=12)]
+    _, _, (m,) = plan_additions(rows, [_it("Swiffer Thing")])
+    assert m["unsorted"] is True and m["items"] == ["Swiffer Thing"]
+
+
+# ------------------------------------------------------------ hela vägen genom verktygen
+def _real_catalog():
+    from ica_mcp.products import ProductCatalog, trim_article
+    arts = [{"id": 11706, "name": "tomat", "pluralName": "tomater", "parentId": 4,
+             "parentIdExtended": 4, "status": 2},
+            {"id": 10500, "name": "vitlök", "pluralName": "", "parentId": 4,
+             "parentIdExtended": 4, "status": 2}]
+    return ProductCatalog([trim_article(a) for a in arts])
+
+
+class _CatFake(_Fake):
+    def __init__(self, rows=()):
+        super().__init__(rows)
+        cat = _real_catalog()
+        self._products = type("C", (), {"get": staticmethod(lambda: cat)})()
+
+    def product_catalog(self):
+        return self._products.get()
+
+
+def _recipe(rid, *ings):
+    return {"id": rid, "title": "R", "ingredientGroups": [{"ingredients": list(ings)}]}
+
+
+def test_recipe_fallback_does_not_swallow_existing_row(monkeypatch):
+    c = _CatFake([_row("tomater", "A", 4, None, src=11706, grp=4)])
+    monkeypatch.setattr(server, "_client", c)
+    monkeypatch.setattr(c, "get_recipe", lambda rid: _recipe(rid, {
+        "ingredient": "körsbärstomater på burk", "quantity": 2, "unit": "st", "ingredientId": 11706}),
+        raising=False)
+    server.add_recipe_to_shopping_list(1)
+    (payload,) = c.synced
+    assert [r["productName"] for r in payload["createdRows"]] == ["körsbärstomater på burk"]
+    assert "changedRows" not in payload
+
+
+def test_unknown_unit_amount_survives_add_or_merge():
+    # flaggan måste överleva to_item i add_or_merge, annars slukas klyftorna av 'vitlök'-raden
+    c = _CatFake([_row("vitlök", "A", 1, None, src=10500, grp=4)])
+    items = IcaClient.aggregate_ingredients([_recipe(1, {
+        "ingredient": "vitlök", "quantity": 3, "unit": "klyftor"})])
+    c.link_products(items, suggestions=0)
+    out = c.add_or_merge("H", items)
+    assert [i["name"] for i in out["created"]] == ["vitlök (3 klyftor)"] and out["merged"] == []
+
+
+def test_merge_false_always_adds_rows(monkeypatch):
+    c = _Fake([_row("mjölk", "A", 1.0, "l")])
+    monkeypatch.setattr(server, "_client", c)
+    msg = server.add_items([server.Item(name="mjölk", quantity=1, unit="l")], merge=False)
+    (payload,) = c.synced
+    assert set(payload) == {"createdRows"} and "La till på 'Handla': 1 l mjölk." in msg
+
+
+def test_unlinked_item_merged_into_unsorted_row_is_reported(monkeypatch):
+    c = _CatFake([_row("swiffer thing", "A", grp=12)])
+    monkeypatch.setattr(server, "_client", c)
+    msg = server.add_items([server.Item(name="swiffer thing")])
+    assert "Ospecificerad" in msg and "swiffer thing" in msg.split("Ospecificerad")[-1]

@@ -95,10 +95,12 @@ def _merge_note(added: dict) -> str:
 
 
 def _only_new(res: dict, added: dict) -> dict:
-    """Rapportera bara okopplade varor som blev egna rader — en vara som gick
-    in i en befintlig rad har den radens avdelning."""
-    created = {it["name"] for it in added["created"] if not it.get("product")}
-    return {**res, "unlinked": [u for u in res["unlinked"] if u["name"] in created]}
+    """Rapportera okopplade varor som blev egna rader, eller som gick in i en
+    befintlig rad som fortfarande saknar avdelning — en vara som gick in i en
+    sorterad rad har den radens avdelning."""
+    keep = {it["name"] for it in added["created"] if not it.get("product")}
+    keep |= {n for m in added["merged"] if m.get("unsorted") for n in m.get("items", [])}
+    return {**res, "unlinked": [u for u in res["unlinked"] if u["name"] in keep]}
 
 
 def _link_note(res: dict) -> str:
@@ -189,7 +191,7 @@ def view_shopping_list(list_name: str | None = None) -> dict:
 
 
 @mcp.tool(annotations=WRITE)
-def add_items(items: list[Item], list_name: str | None = None) -> str:
+def add_items(items: list[Item], list_name: str | None = None, merge: bool = True) -> str:
     """Lägg till en eller flera varor på en inköpslista, var och en som
     {name, quantity?, unit?}, t.ex. {name: 'grädde', quantity: 2, unit: 'dl'}
     eller bara {name: 'mjölk'}. Lägg mängd och enhet i sina fält, inte i namnet.
@@ -197,8 +199,8 @@ def add_items(items: list[Item], list_name: str | None = None) -> str:
     'krossade tomater') och sorteras då i rätt avdelning. Övriga läggs till som
     fritext i angiven category, annars under Ospecificerad — de listas i svaret
     med förslag och kan sorteras med link_item. En vara som redan finns på
-    listan (ej avbockad) får sin mängd ökad i stället för en ny rad.
-    Utelämna list_name för den primära listan."""
+    listan (ej avbockad) får sin mängd ökad i stället för en ny rad; merge=False
+    ger alltid nya rader. Utelämna list_name för den primära listan."""
     parsed = [to_item(i.model_dump()) for i in items]
     parsed = [i for i in parsed if i["name"]]
     if not parsed:
@@ -206,7 +208,7 @@ def add_items(items: list[Item], list_name: str | None = None) -> str:
     c = client()
     L = c.resolve_list(list_name)
     res = c.link_products(parsed)
-    added = c.add_or_merge(L["offlineId"], parsed)
+    added = c.add_or_merge(L["offlineId"], parsed, merge=merge)
     new = ", ".join(map(format_item, added["created"]))
     head = f"La till på '{L.get('title')}': {new}." if new else f"Inga nya rader på '{L.get('title')}'."
     return head + _merge_note(added) + _link_note(_only_new(res, added))
@@ -482,9 +484,11 @@ def search_products(query: str, limit: int = 10) -> list[dict]:
 
 
 @mcp.tool(annotations=WRITE)
-def add_product_to_shopping_list(ean: str, list_name: str | None = None) -> str:
+def add_product_to_shopping_list(ean: str, list_name: str | None = None,
+                                 merge: bool = True) -> str:
     """Slå upp en streckkod (EAN/GTIN) och lägg produktens namn på en lista.
-    Utelämna list_name för primärlistan."""
+    Finns varan redan (ej avbockad) läggs ingen ny rad till; merge=False ger
+    alltid en ny rad. Utelämna list_name för primärlistan."""
     try:
         validate_barcode(ean)
     except IcaError as e:  # bara ogiltig kod — API-fel ska synas som fel
@@ -498,7 +502,7 @@ def add_product_to_shopping_list(ean: str, list_name: str | None = None) -> str:
     # registrets generiska produkt (articleId, t.ex. 'mellanmjölk')
     item = to_item({"name": p["name"], "product_id": p.get("articleId")})
     res = c.link_products([item], suggestions=0)
-    added = c.add_or_merge(L["offlineId"], [item])
+    added = c.add_or_merge(L["offlineId"], [item], merge=merge)
     if added["merged"]:
         return f"'{p['name']}' på '{L.get('title')}':{_merge_note(added)}"
     linked = " (kopplad till ICA-produkt)" if res["linked"] else ""
