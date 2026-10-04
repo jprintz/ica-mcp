@@ -38,6 +38,7 @@ import re
 import sys
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from .client import IcaClient, IcaError
 
@@ -47,6 +48,11 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr,
 _LOG = logging.getLogger("ica_mcp")
 
 mcp = FastMCP("ICA")
+
+# MCP-etiketter så klienter vet vad verktygen gör
+READ = ToolAnnotations(readOnlyHint=True)
+WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
+DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
 _client: IcaClient | None = None
 
 
@@ -82,7 +88,7 @@ def _resolve_rows(list_obj: dict, item: str, unstruck_only: bool = False) -> lis
 
 
 # -------------------------------------------------------------------- tools
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def list_shopping_lists() -> list[dict]:
     """Lista alla dina ICA-inköpslistor med antal varor kvar och avbockade.
     Den första listan är din primära ('Handla') och används som standard när
@@ -100,7 +106,7 @@ def list_shopping_lists() -> list[dict]:
     return out
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def view_shopping_list(list_name: str | None = None) -> dict:
     """Visa innehållet i en inköpslista. list_name matchas mot listans titel
     (utelämna för den primära listan). Returnerar varor uppdelat i kvar/avbockade."""
@@ -113,7 +119,7 @@ def view_shopping_list(list_name: str | None = None) -> dict:
             "summary": f"{len(remaining)} kvar, {len(checked)} avbockade"}
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 def add_items(items: list[str], list_name: str | None = None) -> str:
     """Lägg till en eller flera varor (fri text, t.ex. 'mjölk', '2 kg potatis')
     på en inköpslista. Utelämna list_name för den primära listan."""
@@ -124,7 +130,7 @@ def add_items(items: list[str], list_name: str | None = None) -> str:
     return f"La till {len(items)} vara/varor på '{L.get('title')}': {', '.join(items)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 def check_off(item: str, list_name: str | None = None) -> str:
     """Bocka av en vara (markera som köpt/klar) på en lista."""
     c = client()
@@ -137,7 +143,7 @@ def check_off(item: str, list_name: str | None = None) -> str:
     return f"Bockade av '{rows[0].get('productName')}' på '{fresh.get('title')}'."
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 def uncheck(item: str, list_name: str | None = None) -> str:
     """Ångra avbockning av en vara (markera som ej köpt igen)."""
     c = client()
@@ -150,7 +156,7 @@ def uncheck(item: str, list_name: str | None = None) -> str:
     return f"Ångrade avbockning av '{rows[0].get('productName')}' på '{fresh.get('title')}'."
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 def remove_item(item: str, list_name: str | None = None) -> str:
     """Ta bort en vara helt från en lista (inte samma som att bocka av)."""
     c = client()
@@ -161,7 +167,7 @@ def remove_item(item: str, list_name: str | None = None) -> str:
     return f"Tog bort '{rows[0].get('productName')}' från '{fresh.get('title')}'."
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 def clear_checked(list_name: str | None = None) -> str:
     """Ta bort alla avbockade varor från en lista (rensa upp efter handling)."""
     c = client()
@@ -174,24 +180,25 @@ def clear_checked(list_name: str | None = None) -> str:
     return f"Rensade {len(struck)} avbockade varor från '{fresh.get('title')}'."
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 def create_shopping_list(title: str) -> str:
     """Skapa en ny inköpslista med angiven titel."""
     L = client().create_list(title)
     return f"Skapade listan '{L.get('title')}'."
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 def delete_shopping_list(list_name: str) -> str:
-    """Radera en hel inköpslista (kräver att du anger listnamnet explicit)."""
-    L = client().resolve_list(list_name)
+    """Radera en hel inköpslista. Kräver listans EXAKTA namn (eller id); tomt
+    namn, primärlistan som standard och delmatchning tillåts inte."""
+    L = client().resolve_list(list_name, exact=True)
     title = L.get("title")
     client().delete_list(L["offlineId"])
     return f"Raderade listan '{title}'."
 
 
 # ------------------------------------------------------------------ recept
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def list_saved_recipes(limit: int = 12) -> dict:
     """Lista dina favoritmarkerade recept (senast tillagda först). Hämtar
     detaljer per recept, så håll limit lågt (standard 12)."""
@@ -208,7 +215,7 @@ def list_saved_recipes(limit: int = 12) -> dict:
     return {"total_saved": len(refs), "showing": len(recipes), "recipes": recipes}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def get_recipe(recipe_id: int) -> dict:
     """Hämta ett recept: titel, tid, portioner, ingredienser (fri text) och
     tillagningssteg."""
@@ -219,14 +226,14 @@ def get_recipe(recipe_id: int) -> dict:
     return s
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def random_recipes(count: int = 3) -> list[dict]:
     """Hämta slumpmässiga recept för inspiration (count 1–10)."""
     count = max(1, min(int(count), 10))
     return [IcaClient.recipe_summary(r) for r in client().get_random_recipes(count)]
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 def add_recipe_to_shopping_list(recipe_id: int, list_name: str | None = None) -> str:
     """Lägg alla ingredienser från ett recept som varor på en inköpslista
     (fri text, t.ex. '8 dl mjölk'). Utelämna list_name för primärlistan."""
@@ -242,14 +249,14 @@ def add_recipe_to_shopping_list(recipe_id: int, list_name: str | None = None) ->
 
 
 # ------------------------------------------------------ erbjudanden / butiker
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def list_stores() -> list[dict]:
     """Lista dina favoritbutiker (id, namn, ort). Den första är standardbutik
     för erbjudanden."""
     return client().get_favorite_stores()
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def get_offers(store_name: str | None = None, query: str | None = None,
                limit: int = 40) -> dict:
     """Hämta aktuella erbjudanden för en butik. store_name matchas mot dina
@@ -268,7 +275,7 @@ def get_offers(store_name: str | None = None, query: str | None = None,
             "offers": offers[:max(1, int(limit))]}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def get_bonus() -> dict:
     """Visa din ICA-bonus/Stammis: kupongvärde, aktiva kuponger och rabatt hittills."""
     b = client().get_bonus()
@@ -285,23 +292,29 @@ def get_bonus() -> dict:
 
 
 # ------------------------------------------------------------------ produkt
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def get_product(ean: str) -> dict:
     """Slå upp en produkt via streckkod (EAN/GTIN). Returnerar namn +
     artikelgrupp, eller found=False om koden inte finns."""
-    p = client().get_product(str(ean).strip())
+    try:
+        p = client().get_product(ean)
+    except IcaError as e:
+        return {"found": False, "ean": ean, "message": str(e)}
     if not p:
         return {"found": False, "ean": ean, "message": f"Ingen produkt för EAN {ean}."}
     return {"found": True, "ean": p.get("gtin"), "name": p.get("name"),
             "articleId": p.get("articleId"), "articleGroupId": p.get("articleGroupId")}
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 def add_product_to_shopping_list(ean: str, list_name: str | None = None) -> str:
     """Slå upp en streckkod (EAN/GTIN) och lägg produktens namn på en lista.
     Utelämna list_name för primärlistan."""
     c = client()
-    p = c.get_product(str(ean).strip())
+    try:
+        p = c.get_product(ean)
+    except IcaError as e:
+        return str(e)
     if not p:
         return f"Ingen produkt hittades för EAN {ean}."
     L = c.resolve_list(list_name)
@@ -310,7 +323,7 @@ def add_product_to_shopping_list(ean: str, list_name: str | None = None) -> str:
 
 
 # --------------------------------------------------------- smarta flöden
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def offers_on_my_list(list_name: str | None = None,
                       store_name: str | None = None) -> dict:
     """Korsa din inköpslista mot en butiks aktuella erbjudanden — visar vilka
@@ -340,7 +353,7 @@ def offers_on_my_list(list_name: str | None = None,
             "summary": f"{len(on_sale)} vara/varor på listan har erbjudanden på {store.get('name')}"}
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 def add_recipes_to_shopping_list(recipe_ids: list[int],
                                  list_name: str | None = None) -> str:
     """Lägg ingredienserna från FLERA recept på en lista, ihopslagna (samma
@@ -362,7 +375,7 @@ def add_recipes_to_shopping_list(recipe_ids: list[int],
             f"recept ({titles}) på '{L.get('title')}'.")
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 def plan_dinners(count: int = 5, list_name: str | None = None) -> dict:
     """Planera veckans middagar: hämtar `count` slumprecept (1–10), slår ihop
     deras ingredienser och lägger på en lista (skapar 'Veckans middagar' om
