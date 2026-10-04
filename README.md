@@ -36,6 +36,8 @@ BankID required for accounts that support password login).
 | `list_stores` / `get_offers` | Your favourite stores; current offers for a store |
 | `get_bonus` | Your ICA bonus / Stammis balance |
 | `get_product` | Look up a product by barcode (EAN/GTIN) |
+| `search_products` | Search ICA's product catalogue, e.g. to find the `product_id` for an item that wasn't linked automatically |
+| `link_item` | Sort an item already on a list: link it to a catalogue product or give it a section (category) |
 | `add_product_to_shopping_list` | Look up a barcode and add the product's name to a list |
 | `offers_on_my_list` | Which items on your list are on sale at a store |
 | `add_recipes_to_shopping_list` | Merge several recipes' ingredients onto one list |
@@ -44,6 +46,34 @@ BankID required for accounts that support password login).
 Lists, items and stores are referenced **by name**, so an agent can act on
 natural language. Omitting a list/store name targets your primary one (the
 `Handla` list / your first favourite store).
+
+### Product linking and categories
+
+The ICA app sorts a list by section (Mejeri, Frukt & Grönt …) when the list
+has a store. An item gets its section from the product it is linked to in
+ICA's catalogue (~6,900 generic products such as `mjölk` or `krossad tomat`).
+**Free text that doesn't match a product ends up under _Ospecificerad_.** The
+server therefore links items, without guessing:
+
+- `add_items` links an item when its name exactly matches a product name or
+  plural (case-insensitive; notes in brackets such as `(à ca 400 g)` are
+  ignored). Otherwise the item is added as free text, in its `category`
+  (section) if the agent gave one, and the reply lists the unsorted ones with
+  suggestions.
+- `link_item` sorts an item already on the list, by `product_id` (from the
+  suggestions or `search_products`) or by `category`.
+- Recipe ingredients keep their names and are linked by exact name first,
+  then by ICA's own recipe `ingredientId`. The id is only a fallback because
+  it is sometimes too coarse (`krossade tomater` → `tomat`, i.e. fresh
+  tomatoes); in a sample of 44 unmatched ingredients it gave the right section
+  for 41.
+- Barcode lookups are linked via the product's own `articleId`.
+- `view_shopping_list` shows each item's section, so unsorted items are easy
+  to spot.
+
+The catalogue (~3 MB) is fetched on first use and cached in memory and on disk
+for 24 hours (`ica-mcp` in the per-user cache dir; set `ICA_CACHE_DIR` to move
+it). If it can't be fetched, items are added as free text.
 
 ## Requirements
 
@@ -175,6 +205,8 @@ public in that project), not user secrets.
   `chmod 0600` on POSIX. On **Windows** that only toggles the read-only bit, so
   the file is not OS-ACL-protected there — treat the machine account as the
   trust boundary. Set `ICA_STATE_FILE` to relocate the cache.
+- The product catalogue cache (see *Product linking and categories*) holds
+  only ICA's public product list, no personal data.
 - **No `keyring` dependency by design.** The Swedish-egress requirement pushes
   many users onto headless homelab/VPS boxes that lack a Secret Service /
   Credential Manager; a portable `0600` file is the deliberate choice.

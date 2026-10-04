@@ -36,6 +36,8 @@ from urllib.parse import urlparse, parse_qs
 import platformdirs
 import requests
 
+from .products import ARTICLES_PATH, CATEGORY_IDS, ProductCache, ProductCatalog
+
 try:
     import jwt  # PyJWT — valfritt, bara för att läsa användarnamn ur id_token
 except ImportError:  # pragma: no cover
@@ -214,16 +216,33 @@ def normalize_unit(unit) -> str | None:
         raise ValueError(f"okänd enhet {unit!r}") from None
 
 
+# ICA:s recept har ibland förpackningen först i ingrediensnamnet i stället
+# för i unit-fältet: "förp majskorn (à 150 g)".
+_PACKAGE_WORDS = {"förp", "förp.", "förpackning", "förpackningar", "paket"}
+
+
 def to_item(it) -> dict:
     """Normalisera en vara till {name, quantity, unit}. En dict {name,
-    quantity?, unit?} eller en sträng (= bara namn; texten tolkas aldrig).
-    Enheten följer alltid UNITS; mängd utan enhet blir 'st', enhet utan mängd
-    tas bort. Okänd enhet med mängd ger ValueError (se normalize_unit)."""
+    quantity?, unit?, product_id?} eller en sträng (= bara namn; texten tolkas
+    aldrig). Enheten följer alltid UNITS; mängd utan enhet blir 'st', enhet
+    utan mängd tas bort, och okänd enhet med mängd ger ValueError (se
+    normalize_unit). Följer med om de finns: product_id (önskad ICA-produkt),
+    fallback_product_id (receptets ingredientId), category (avdelning, se
+    products.Category) och product (kopplad produkt, se IcaClient.link_products)."""
     if isinstance(it, str):
         it = {"name": it}
     qty = _to_number(it.get("quantity"))
     unit = (normalize_unit(it.get("unit")) or "st") if qty else None
-    return {"name": str(it.get("name") or "").strip(), "quantity": qty, "unit": unit}
+    out = {"name": str(it.get("name") or "").strip(), "quantity": qty, "unit": unit}
+    for key in ("product_id", "fallback_product_id"):
+        pid = it.get(key)
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            out[key] = pid
+    if it.get("category") in CATEGORY_IDS:
+        out["category"] = it["category"]
+    if isinstance(it.get("product"), dict):
+        out["product"] = it["product"]
+    return out
 
 
 def format_quantity(q: float) -> str:
@@ -236,6 +255,15 @@ def format_item(it: dict) -> str:
     if not it.get("quantity"):
         return it["name"]
     return " ".join(p for p in (format_quantity(it["quantity"]), it.get("unit"), it["name"]) if p)
+
+
+def apply_product(row: dict, p: dict) -> None:
+    """Koppla en rad till ICA-produkten p (som när man väljer ett förslag i
+    appen). Avdelningen sätts bara om produkten har en — aldrig null."""
+    row["sourceId"] = p["id"]
+    if p.get("parentId"):
+        row["articleGroupId"] = p["parentId"]
+        row["articleGroupIdExtended"] = p.get("parentIdExtended") or p["parentId"]
 
 
 class IcaClient:
@@ -505,7 +533,11 @@ class IcaClient:
         return self._api("POST", f"{SL_PATH}/{offline_id}/sync", payload).json()
 
     def add_rows(self, offline_id: str, items: list) -> dict:
-        """Lägg till varor: dicts {name, quantity?, unit?} (se to_item)."""
+        """Lägg till varor: dicts {name, quantity?, unit?, product?, category?}
+        (se to_item). En vara med product (från link_products) kopplas till
+        ICA-produkten som när man väljer ett förslag i appen; annars läggs den
+        till som fritext, i avdelningen category om den finns (annars hamnar
+        den under Ospecificerad)."""
         rows = []
         for it in map(to_item, items):
             if not it["name"]:
@@ -517,6 +549,10 @@ class IcaClient:
                 "isStrikedOver": False,
                 "recipes": [],
             }
+            if it.get("product"):
+                apply_product(row, it["product"])
+            elif it.get("category"):
+                row["articleGroupId"] = row["articleGroupIdExtended"] = CATEGORY_IDS[it["category"]]
             if it.get("quantity") is not None:
                 row["quantity"] = float(it["quantity"])
             if it.get("unit"):
@@ -539,6 +575,56 @@ class IcaClient:
         Verifierat mot ICA: /sync med changedShoppingListProperties."""
         return self._sync(offline_id, {"changedShoppingListProperties": {
             "sortingStore": int(store_id), "latestChange": _ts()}})
+
+    # ---------------------------------------------------- produktregister
+    def _fetch_articles(self) -> list[dict]:
+        return self._api("GET", ARTICLES_PATH).json().get("articles", [])
+
+    def product_catalog(self) -> ProductCatalog | None:
+        """ICA:s produktregister, cachat i minnet och på disk (se products.py).
+        None om det inte kan hämtas och ingen cache finns."""
+        if getattr(self, "_products", None) is None:
+            self._products = ProductCache(self._fetch_articles)
+        return self._products.get()
+
+    def link_products(self, items: list[dict], suggestions: int = 3) -> dict:
+        """Koppla varor (från to_item) till ICA-produkter, på plats, i ordningen:
+        product_id → exakt namn eller pluralnamn (se ProductCatalog.match) →
+        fallback_product_id (receptets ingredientId). Namnet behålls. Ingen
+        gissning — omatchade varor returneras, med förslag om de saknar
+        category (annars hamnar de under Ospecificerad).
+        Returnerar {available, linked, unlinked: [{name, reason?, category?,
+        suggestions}], explicit: [{name, product}], fallback: [{name, product}]}
+        — explicit/fallback är kopplingar via product_id resp. ingredientId,
+        som ska redovisas eftersom namnet inte styrkte dem."""
+        catalog = self.product_catalog()
+        if catalog is None:
+            return {"available": False, "linked": 0, "unlinked": [], "explicit": [], "fallback": []}
+        linked, unlinked, explicit, via_fallback = 0, [], [], []
+        for it in items:
+            pid = it.pop("product_id", None)
+            fallback = it.pop("fallback_product_id", None)
+            p = catalog.get(pid) if pid else None
+            if p:
+                explicit.append({"name": it["name"], "product": p})
+            else:
+                p = catalog.match(it["name"])
+            if not p and fallback and (p := catalog.get(fallback)):
+                via_fallback.append({"name": it["name"], "product": p})
+            if p:
+                it["product"] = p
+                linked += 1
+                continue
+            want = suggestions if suggestions > 0 and not it.get("category") else 0
+            hits = catalog.search(it["name"], want) if want else []
+            entry = {"name": it["name"], "suggestions": [catalog.summary(a) for a in hits]}
+            if it.get("category"):
+                entry["category"] = it["category"]
+            if pid:
+                entry["reason"] = f"okänt produkt-id {pid}"
+            unlinked.append(entry)
+        return {"available": True, "linked": linked, "unlinked": unlinked,
+                "explicit": explicit, "fallback": via_fallback}
 
     # ---------------------------------------------------- resolvers
     def resolve_list(self, ref: str | int | None = None, exact: bool = False) -> dict:
@@ -655,14 +741,18 @@ class IcaClient:
     @staticmethod
     def aggregate_ingredients(recipes: list[dict]) -> list[dict]:
         """Slå ihop ingredienser från ett eller flera recept till varor
-        {name, quantity, unit} (se to_item). Samma vara + samma enhet summeras
+        {name, quantity, unit} (se to_item). Samma namn + samma enhet summeras
         (2 dl + 3 dl mjölk → 5 dl mjölk); olika enheter blir separata varor.
         Varor utan mängd (salt) tas med en gång. Ordningen bevaras.
 
         Mängder i enheter som saknar ICA-motsvarighet (3 klyftor vitlök)
         summeras per enhet men behålls i namnet – 'vitlök (3 klyftor)' – i
         stället för att bli '3 st'. Saknas ingrediensnamn används receptraden
-        som den är, utan separat mängd (den står redan i texten)."""
+        som den är, utan separat mängd (den står redan i texten).
+
+        ingredientId följer med som fallback_product_id: det används bara om
+        namnet inte matchar en produkt, och aldrig för sammanslagning — det
+        pekar ibland på en för grov produkt ('krossade tomater' → 'tomat')."""
         groups: dict[tuple, dict] = {}
         for r in recipes:
             for grp in r.get("ingredientGroups", []):
@@ -671,17 +761,22 @@ class IcaClient:
                     if not name:
                         text = (ing.get("text") or "").strip()
                         if text:
-                            groups.setdefault((text.lower(), None),
-                                              {"name": text, "quantity": None, "unit": None})
+                            groups.setdefault((text.lower(), None), to_item(
+                                {"name": text, "fallback_product_id": ing.get("ingredientId")}))
                         continue
+                    unit = ing.get("unit")
+                    first, _, rest = name.partition(" ")
+                    if not unit and rest and first.lower() in _PACKAGE_WORDS:
+                        unit, name = "förp", rest.strip()  # "förp majskorn (à 150 g)"
+                    fallback = ing.get("ingredientId")
                     try:
-                        it = to_item({"name": name, "quantity": ing.get("quantity"),
-                                      "unit": ing.get("unit")})
+                        it = to_item({"name": name, "quantity": ing.get("quantity"), "unit": unit,
+                                      "fallback_product_id": fallback})
                         key = (name.lower(), it["unit"])
                     except ValueError:
-                        raw = str(ing.get("unit")).strip()
-                        it = {"name": name, "quantity": _to_number(ing.get("quantity")),
-                              "unit": None, "_raw_unit": raw}
+                        raw = str(unit).strip()
+                        it = to_item({"name": name, "fallback_product_id": fallback})
+                        it.update(quantity=_to_number(ing.get("quantity")), _raw_unit=raw)
                         key = (name.lower(), "raw:" + raw.lower())
                     g = groups.setdefault(key, it)
                     if g is not it and it["quantity"]:
@@ -690,8 +785,8 @@ class IcaClient:
         for g in groups.values():
             raw = g.pop("_raw_unit", None)
             if raw is not None:
-                g = {"name": f"{g['name']} ({format_quantity(g['quantity'])} {raw})",
-                     "quantity": None, "unit": None}
+                g = {**g, "name": f"{g['name']} ({format_quantity(g['quantity'])} {raw})",
+                     "quantity": None}
             out.append(g)
         return out
 

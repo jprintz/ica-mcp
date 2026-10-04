@@ -112,7 +112,8 @@ def test_plan_dinners_notes_ignored_store_for_existing_list(monkeypatch):
     c.add_rows = lambda oid, items: None
     monkeypatch.setattr(server, "client", lambda: c)
     out = server.plan_dinners(1, store_name="Willys")
-    assert "oförändrad" in out["note"] and c.posted == []
+    assert "oförändrad" in out["note"]
+    assert not [m for m, *_ in c.posted if m == "POST"]  # ingen ny lista skapades
     assert "note" not in server.plan_dinners(1)  # ingen store_name → ingen anmärkning
 
 
