@@ -38,7 +38,7 @@ def test_file_mode_is_0600(tmp_path):
     assert os.stat(cl.state_file).st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize("target", ["json.dump", "os.replace"])
+@pytest.mark.parametrize("target", ["json.dumps", "os.fsync", "os.replace"])
 def test_failed_write_keeps_old_file_and_no_temp(tmp_path, monkeypatch, target):
     cl = _mk(tmp_path)
     cl._state = {"token": _tok("old")}
@@ -168,3 +168,105 @@ def test_other_account_wins_with_warning(tmp_path, monkeypatch, caplog):
 def test_account_of_without_id_token():
     assert IcaClient._account_of({}) is None
     assert IcaClient._account_of({"token": {"id_token": "inte-en-jwt"}}) is None
+
+
+# ------------------------------------------------------------ granskningsfynd
+class _Resp:
+    def __init__(self, status, body=None):
+        self.status_code, self._body = status, body or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+            raise requests.HTTPError(response=self)
+
+    def json(self):
+        return self._body
+
+
+def test_failed_save_does_not_resurrect_older_token(tmp_path, monkeypatch):
+    # refresh lyckas (r2) men sparningen misslyckas; disken har kvar r1. Nästa
+    # gång får vi inte ta tillbaka r1 från disk — den är redan förbrukad.
+    client = {"client_id": "x", "client_secret": "y"}
+    a = _mk(tmp_path)
+    a._state = {"client": client, "token": _tok("a1", "r1", minutes=-5)}
+    a._save_state()
+    sent = []
+
+    def post(url, data=None, **k):
+        sent.append(data["refresh_token"])
+        n = len(sent)
+        return _Resp(200, {"access_token": f"a{n + 1}", "refresh_token": f"r{n + 1}",
+                           "expires_in": -600})  # utgår direkt → nästa anrop refreshar igen
+
+    monkeypatch.setattr(a.session, "post", post)
+    monkeypatch.setattr(c.os, "replace", lambda *x: (_ for _ in ()).throw(PermissionError("låst")))
+    assert a._access_token() == "a2"
+    assert a._access_token() == "a3"
+    assert sent == ["r1", "r2"]  # inte ["r1", "r1"]
+
+
+def test_retries_refresh_with_token_rotated_by_other_process(tmp_path, monkeypatch):
+    # A och B refreshar samtidigt med r1; B hann först och skrev r2.
+    client = {"client_id": "x", "client_secret": "y"}
+    a = _mk(tmp_path)
+    a._state = {"client": client, "token": _tok("old", "r1", minutes=-5)}
+    a._save_state()
+    sent = []
+
+    def post(url, data=None, **k):
+        sent.append(data["refresh_token"])
+        if data["refresh_token"] == "r1":
+            b = _mk(tmp_path)  # B skriver sin roterade token, men med utgången access-token
+            b._state = {"client": client, "token": _tok("b-old", "r2", minutes=-5)}
+            b._save_state()
+            return _Resp(400)
+        return _Resp(200, {"access_token": "fresh", "refresh_token": "r3", "expires_in": 900})
+
+    monkeypatch.setattr(a.session, "post", post)
+    monkeypatch.setattr(a, "_full_login", lambda: pytest.fail("ska inte behöva full inloggning"))
+    assert a._access_token() == "fresh"
+    assert sent == ["r1", "r2"]
+
+
+def test_refresh_failure_adopts_valid_token_from_other_process(tmp_path, monkeypatch):
+    client = {"client_id": "x", "client_secret": "y"}
+    a = _mk(tmp_path)
+    a._state = {"client": client, "token": _tok("old", "r1", minutes=-5)}
+    a._save_state()
+
+    def post(url, data=None, **k):
+        b = _mk(tmp_path)
+        b._state = {"client": client, "token": _tok("b-fresh", "r2")}
+        b._save_state()
+        return _Resp(400)
+
+    monkeypatch.setattr(a.session, "post", post)
+    monkeypatch.setattr(a, "_full_login", lambda: pytest.fail("ska inte behöva full inloggning"))
+    assert a._access_token() == "b-fresh"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlänkar")
+def test_symlinked_state_file_keeps_link(tmp_path):
+    real = tmp_path / "real" / "state.json"
+    real.parent.mkdir()
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    cl = _mk(tmp_path, "link.json")
+    cl._state = {"token": _tok("a")}
+    cl._save_state()
+    assert link.is_symlink()
+    assert json.loads(real.read_text())["token"]["access_token"] == "a"
+    assert sorted(p.name for p in real.parent.iterdir()) == ["state.json"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-rättigheter")
+def test_new_state_dir_is_private(tmp_path):
+    old = os.umask(0o022)
+    try:
+        cl = _mk(tmp_path, "sub/state.json")
+        cl._state = {"token": _tok("a")}
+        cl._save_state()
+    finally:
+        os.umask(old)
+    assert os.stat(tmp_path / "sub").st_mode & 0o777 == 0o700

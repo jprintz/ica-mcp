@@ -93,7 +93,7 @@ def _ensure_parent_dir(path: str) -> None:
     == '', vilket annars ger FileNotFoundError från os.makedirs)."""
     d = os.path.dirname(path)
     if d:
-        os.makedirs(d, exist_ok=True)
+        os.makedirs(d, mode=0o700, exist_ok=True)  # ny katalog: bara ägaren
 
 
 def _legacy_state_candidates() -> list[str]:
@@ -167,6 +167,8 @@ class IcaClient:
         if user_agent:
             self.session.headers["User-Agent"] = user_agent
         self._lock = threading.RLock()
+        self._disk_digest: str | None = None  # sha256 av filen vi senast läste/skrev
+        self._foreign_account = False  # bytt till annat kontos state från disk
         self._state = self._load_state()
 
     # ----------------------------------------------------------------- state
@@ -187,20 +189,26 @@ class IcaClient:
                 _LOG.warning("Kunde inte migrera %s: %s", legacy, e)
             return
 
-    def _read_state_file(self) -> dict | None:
-        """Läs state-filen; None om den saknas eller är oläsbar/ogiltig."""
+    def _read_state_file(self) -> tuple[dict | None, str | None]:
+        """Läs state-filen → (data, sha256 av innehållet). data är None om filen
+        saknas eller är oläsbar/ogiltig."""
         try:
-            with open(self.state_file, encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else None
-        except (OSError, ValueError):
-            return None
+            with open(self.state_file, "rb") as f:
+                raw = f.read()
+        except OSError:
+            return None, None
+        digest = hashlib.sha256(raw).hexdigest()
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            return None, digest
+        return (data if isinstance(data, dict) else None), digest
 
     def _load_state(self) -> dict:
         if not os.path.exists(self.state_file):
             self._migrate_legacy_state()
         if os.path.exists(self.state_file):
-            data = self._read_state_file()
+            data, self._disk_digest = self._read_state_file()
             if data is not None:
                 return data
             _LOG.warning("Kunde inte läsa %s, börjar om.", self.state_file)
@@ -208,16 +216,20 @@ class IcaClient:
 
     def _write_state_file(self, data: dict) -> None:
         """Atomisk skrivning: temp-fil (0600 från start via mkstemp) i samma
-        katalog → flush + fsync → os.replace. Städar temp-filen vid fel."""
-        _ensure_parent_dir(self.state_file)
+        katalog → flush + fsync → os.replace. Städar temp-filen vid fel. Är
+        state-filen en symlänk skrivs målfilen, så länken fortsätter fungera."""
+        target = os.path.realpath(self.state_file)
+        payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        _ensure_parent_dir(target)
         fd, tmp = tempfile.mkstemp(
-            dir=os.path.dirname(self.state_file) or ".", prefix=".auth_state.", suffix=".tmp")
+            dir=os.path.dirname(target) or ".", prefix=".auth_state.", suffix=".tmp")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            with os.fdopen(fd, "wb") as f:
+                f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp, self.state_file)
+            os.replace(tmp, target)
+            self._disk_digest = hashlib.sha256(payload).hexdigest()
         except BaseException:
             try:
                 os.unlink(tmp)
@@ -251,17 +263,22 @@ class IcaClient:
         if mine and theirs and mine != theirs:
             _LOG.warning("Auth-state i %s tillhör ett annat ICA-konto (ny inloggning?). "
                          "Byter till det kontot.", self.state_file)
+            self._foreign_account = True
         self._state = data
 
     def _reload_state_from_disk(self, stale_access: str | None) -> bool:
         """Läs om state-filen (en annan process kan ha loggat in/refreshat).
+        Bara en fil som någon annan har skrivit sedan vi senast läste/skrev den
+        räknas: misslyckades vår egen sparning ligger vår äldre state kvar på
+        disk, och den får inte ersätta den nyare i minnet.
         Returnerar True om filen har en giltig token som skiljer sig från den
         föråldrade ``stale_access`` — då antas filens state och inget nätverksanrop
         behövs. Annars antas filens state ändå om refresh-token/klient skiljer.
         Se _adopt_state om kontot har bytts."""
-        data = self._read_state_file()
-        if not data:
+        data, digest = self._read_state_file()
+        if not data or digest == self._disk_digest:
             return False
+        self._disk_digest = digest
         tok = data.get("token") or {}
         if self._token_valid(tok) and tok["access_token"] != stale_access:
             self._adopt_state(data)
@@ -408,8 +425,22 @@ class IcaClient:
                     self._refresh()
                     return self._state["token"]["access_token"]
                 except requests.HTTPError as e:
-                    _LOG.info("Refresh misslyckades (%s) — gör full inloggning.",
+                    _LOG.info("Refresh misslyckades (%s).",
                               e.response.status_code if e.response is not None else "?")
+                # en annan process kan ha roterat refresh-token medan vi refreshade
+                if self._reload_state_from_disk(tok.get("access_token")):
+                    return self._state["token"]["access_token"]
+                newer = (self._state.get("token") or {}).get("refresh_token")
+                if newer and newer != tok["refresh_token"]:
+                    try:
+                        self._refresh()
+                        return self._state["token"]["access_token"]
+                    except requests.HTTPError:
+                        pass
+                _LOG.info("Gör full inloggning.")
+            if self._foreign_account and self.username:
+                _LOG.warning("Gör full inloggning med ICA_USER efter byte till ett annat "
+                             "kontos auth-state — kan byta tillbaka till det kontot.")
             self._full_login()
             return self._state["token"]["access_token"]
 
