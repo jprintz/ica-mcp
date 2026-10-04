@@ -22,6 +22,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -169,26 +170,50 @@ UNITS: tuple[str, ...] = get_args(Unit)
 
 
 def _to_number(value) -> float | None:
-    """2 / 1.5 / '1,5' → float; tomt, 0 eller ogiltigt → None (ICA anger
-    "ingen mängd" som 0)."""
+    """2 / 1.5 / '1,5' → float; tomt, 0, negativt, inf/nan eller ogiltigt →
+    None (ICA anger "ingen mängd" som 0)."""
     if value is None or isinstance(value, bool):
         return None
     try:
         n = float(str(value).strip().replace(",", ".")) if isinstance(value, str) else float(value)
     except ValueError:
         return None
-    return round(n, 3) if n > 0 else None
+    if not math.isfinite(n):
+        return None
+    n = round(n, 3)
+    return n if n > 0 else None
+
+
+# Stavningar i receptdata/fritext → ICA-enhet. Förpackningar som köps hela
+# (burk, påse, flaska) räknas som st; paket/ask som förp.
+_UNIT_ALIASES = {
+    **{u: u for u in UNITS},
+    "styck": "st", "stycken": "st", "stk": "st",
+    "burk": "st", "burkar": "st", "påse": "st", "påsar": "st",
+    "flaska": "st", "flaskor": "st",
+    "förpackning": "förp", "förpackningar": "förp", "pkt": "förp", "paket": "förp",
+    "ask": "förp", "askar": "förp",
+    "kilo": "kg", "kilogram": "kg", "hekto": "hg", "hektogram": "hg",
+    "gr": "g", "gram": "g",
+    "liter": "l", "deciliter": "dl", "centiliter": "cl", "milliliter": "ml",
+    "matsked": "msk", "matskedar": "msk", "tesked": "tsk", "teskedar": "tsk",
+    "kryddmått": "krm",
+}
 
 
 def normalize_unit(unit) -> str | None:
-    """Enhet → en av UNITS. Okända enheter (t.ex. 'burk' i receptdata) blir
-    'st'; tomt/None → None."""
+    """Enhet → en av UNITS ('liter' → 'l', 'pkt' → 'förp', 'burk' → 'st').
+    Tomt/None → None. Okända enheter ('klyftor', 'nypa', 'cm') ger ValueError:
+    de går inte att uttrycka i ICA:s enheter utan att mängden ändrar betydelse."""
     if unit is None:
         return None
     u = str(unit).strip().lower().rstrip(".")
     if not u:
         return None
-    return u if u in UNITS else "st"
+    try:
+        return _UNIT_ALIASES[u]
+    except KeyError:
+        raise ValueError(f"okänd enhet {unit!r}") from None
 
 
 # ICA:s recept har ibland förpackningen först i ingrediensnamnet i stället
@@ -200,10 +225,11 @@ def to_item(it) -> dict:
     """Normalisera en vara till {name, quantity, unit}. En dict {name,
     quantity?, unit?, product_id?} eller en sträng (= bara namn; texten tolkas
     aldrig). Enheten följer alltid UNITS; mängd utan enhet blir 'st', enhet
-    utan mängd tas bort. Följer med om de finns: product_id (önskad
-    ICA-produkt), fallback_product_id (receptets ingredientId), category
-    (avdelning, se products.Category), product (kopplad produkt, se
-    IcaClient.link_products) och recipes (receptandelar, se add_recipe_share)."""
+    utan mängd tas bort, och okänd enhet med mängd ger ValueError (se
+    normalize_unit). Följer med om de finns: product_id (önskad ICA-produkt),
+    fallback_product_id (receptets ingredientId), category (avdelning, se
+    products.Category), product (kopplad produkt, se IcaClient.link_products)
+    och recipes (receptandelar, se add_recipe_share)."""
     if isinstance(it, str):
         it = {"name": it}
     qty = _to_number(it.get("quantity"))
@@ -290,9 +316,11 @@ def merge_quantities(q1, u1, q2, u2) -> tuple | None:
 
 def _same_item(a: dict, b: dict) -> bool:
     """Samma vara: samma ICA-produkt om båda är kopplade, annars samma namn.
-    Två olika produkter med samma namn räknas inte som samma vara."""
+    Två olika produkter med samma namn räknas inte som samma vara. En vara
+    vars mängd står i namnet ('vitlök (3 klyftor)', se aggregate_ingredients)
+    jämförs bara på namn – annars skulle mängden försvinna i en st-rad."""
     pa, pb = (a.get("product") or {}).get("id"), (b.get("product") or {}).get("id")
-    if pa and pb:
+    if pa and pb and not (a.get("amount_in_name") or b.get("amount_in_name")):
         return pa == pb
     return " ".join(a["name"].lower().split()) == " ".join(b["name"].lower().split())
 
@@ -370,11 +398,16 @@ def plan_additions(rows: list[dict], items: list[dict]) -> tuple[list, list, lis
     return new, changed, merges
 
 
+def format_quantity(q: float) -> str:
+    """1.5 → '1,5', 2.0 → '2' (svensk decimalkomma)."""
+    return f"{q:g}".replace(".", ",")
+
+
 def format_item(it: dict) -> str:
     """{name: 'grädde', quantity: 2.0, unit: 'dl'} → '2 dl grädde'."""
     if not it.get("quantity"):
         return it["name"]
-    return " ".join(p for p in (f"{it['quantity']:g}", it.get("unit"), it["name"]) if p)
+    return " ".join(p for p in (format_quantity(it["quantity"]), it.get("unit"), it["name"]) if p)
 
 
 class IcaClient:
@@ -854,26 +887,61 @@ class IcaClient:
         separata varor. Varor utan mängd (salt) tas med en gång. Ordningen bevaras. Varje
         recepts andel sparas i recipes (se add_recipe_share), så att appen
         visar varför varan finns på listan.
+
+        Mängder i enheter som saknar ICA-motsvarighet (3 klyftor vitlök)
+        summeras per enhet men behålls i namnet – 'vitlök (3 klyftor)' – i
+        stället för att bli '3 st'; deras receptandel får då ingen mängd.
+        Saknas ingrediensnamn används receptraden som den är, utan separat
+        mängd (den står redan i texten).
+
         ingredientId följer med som fallback_product_id: det används bara om
         namnet inte matchar en produkt, och aldrig för sammanslagning — det
         pekar ibland på en för grov produkt ('krossade tomater' → 'tomat')."""
         items: list[dict] = []
+        raw_groups: dict[tuple, dict] = {}  # (namn, okänd enhet) → vara
         for r in recipes:
             rid = r.get("id")
+            is_rid = isinstance(rid, int) and not isinstance(rid, bool)
             for grp in r.get("ingredientGroups", []):
                 for ing in grp.get("ingredients", []):
-                    name = (ing.get("ingredient") or ing.get("text") or "").strip()
+                    name = (ing.get("ingredient") or "").strip()
                     if not name:
+                        text = (ing.get("text") or "").strip()
+                        if text:
+                            it = to_item({"name": text,
+                                          "fallback_product_id": ing.get("ingredientId")})
+                            if is_rid:
+                                add_recipe_share(it, rid, None, None)
+                            items.append(it)
                         continue
                     unit = ing.get("unit")
                     first, _, rest = name.partition(" ")
                     if not unit and rest and first.lower() in _PACKAGE_WORDS:
                         unit, name = "förp", rest.strip()  # "förp majskorn (à 150 g)"
-                    it = to_item({"name": name, "quantity": ing.get("quantity"), "unit": unit,
-                                  "fallback_product_id": ing.get("ingredientId")})
-                    if isinstance(rid, int) and not isinstance(rid, bool):
+                    fallback = ing.get("ingredientId")
+                    try:
+                        it = to_item({"name": name, "quantity": ing.get("quantity"), "unit": unit,
+                                      "fallback_product_id": fallback})
+                    except ValueError:
+                        # okänd enhet: summera per enhet, mängden hamnar i namnet nedan
+                        raw = str(unit).strip()
+                        g = raw_groups.get((name.lower(), raw.lower()))
+                        if g is None:
+                            g = to_item({"name": name, "fallback_product_id": fallback})
+                            g["_raw"] = [raw, 0.0]
+                            g["amount_in_name"] = True
+                            raw_groups[(name.lower(), raw.lower())] = g
+                            items.append(g)
+                        g["_raw"][1] = round(g["_raw"][1] + (_to_number(ing.get("quantity")) or 0), 3)
+                        if is_rid:
+                            add_recipe_share(g, rid, None, None)
+                        continue
+                    if is_rid:
                         add_recipe_share(it, rid, it["quantity"], it["unit"])
                     items.append(it)
+        for g in raw_groups.values():
+            raw, q = g.pop("_raw")
+            g["name"] = f"{g['name']} ({format_quantity(q)} {raw})"
         return plan_additions([], items)[0]
 
     # ---------------------------------------------------- butiker

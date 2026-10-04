@@ -216,7 +216,7 @@ def test_add_items_reply_reports_merges(monkeypatch):
                             server.Item(name="fast potatis", quantity=1, unit="kg"),
                             server.Item(name="bröd")])
     assert "La till på 'Handla': bröd." in msg
-    assert "1 l mjölk → 2 l mjölk" in msg and "500 g fast potatis → 1.5 kg fast potatis" in msg
+    assert "1 l mjölk → 2 l mjölk" in msg and "500 g fast potatis → 1,5 kg fast potatis" in msg
 
 
 def test_add_items_all_merged(monkeypatch):
@@ -229,7 +229,7 @@ def test_unchanged_row_is_not_written():
     rows = [_row("gräddfil", "A", 1.5, "dl", src=10565, grp=10)]
     new, changed, merges = plan_additions(rows, [_it("Gräddfil Arla Ko", product=_p(10565))])
     assert new == [] and changed == []
-    assert merges == [{"name": "gräddfil", "before": "1.5 dl gräddfil", "after": "1.5 dl gräddfil"}]
+    assert merges == [{"name": "gräddfil", "before": "1,5 dl gräddfil", "after": "1,5 dl gräddfil"}]
     c = _Fake(rows)
     out = c.add_or_merge("H", [{"name": "Gräddfil Arla Ko", "product": _p(10565)}])
     assert c.synced == [] and out["merged"]  # inget anrop alls
@@ -245,3 +245,14 @@ def test_reply_marks_unchanged_amounts(monkeypatch):
     monkeypatch.setattr(server, "_client", _Fake([_row("salt", "A", 1.0, "tsk")]))
     msg = server.add_items([server.Item(name="salt")])
     assert "1 tsk salt (oförändrad mängd)" in msg
+
+
+def test_amount_in_name_is_not_merged_by_product():
+    # 'vitlök (3 klyftor)' kopplas till samma produkt som '1 st vitlök' men får
+    # inte slås ihop – då försvinner klyftorna utan spår
+    rows = [_row("vitlök", "A", 1, None, src=10500, grp=4)]
+    item = {"name": "vitlök (3 klyftor)", "quantity": None, "unit": None,
+            "amount_in_name": True, "product": _p(10500)}
+    new, changed, merges = plan_additions(rows, [item])
+    assert [i["name"] for i in new] == ["vitlök (3 klyftor)"]
+    assert changed == [] and merges == []
