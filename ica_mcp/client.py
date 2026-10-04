@@ -231,24 +231,47 @@ class IcaClient:
         except (OSError, TypeError, ValueError) as e:
             _LOG.warning("Kunde inte spara auth-state: %s", e)
 
+    @staticmethod
+    def _account_of(state: dict) -> str | None:
+        """Kontots id (``sub`` i id_token), eller None om det inte går att läsa."""
+        idt = (state.get("token") or {}).get("id_token")
+        if not (jwt and idt):
+            return None
+        try:
+            return jwt.decode(idt, options={"verify_signature": False}).get("sub")
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _adopt_state(self, data: dict) -> None:
+        """Byt till state från filen. Den senaste inloggningen vinner: har någon
+        kört `ica-mcp login` med ett annat konto används det kontot härefter
+        (annars skulle vi skriva över den nya inloggningen vid nästa refresh) —
+        men det loggas tydligt."""
+        mine, theirs = self._account_of(self._state), self._account_of(data)
+        if mine and theirs and mine != theirs:
+            _LOG.warning("Auth-state i %s tillhör ett annat ICA-konto (ny inloggning?). "
+                         "Byter till det kontot.", self.state_file)
+        self._state = data
+
     def _reload_state_from_disk(self, stale_access: str | None) -> bool:
         """Läs om state-filen (en annan process kan ha loggat in/refreshat).
         Returnerar True om filen har en giltig token som skiljer sig från den
         föråldrade ``stale_access`` — då antas filens state och inget nätverksanrop
-        behövs. Annars antas filens state ändå om refresh-token/klient skiljer."""
+        behövs. Annars antas filens state ändå om refresh-token/klient skiljer.
+        Se _adopt_state om kontot har bytts."""
         data = self._read_state_file()
         if not data:
             return False
         tok = data.get("token") or {}
         if self._token_valid(tok) and tok["access_token"] != stale_access:
-            self._state = data
+            self._adopt_state(data)
             return True
         mine = self._state.get("token") or {}
         if tok.get("refresh_token") and data.get("client") and (
             tok["refresh_token"] != mine.get("refresh_token")
             or data["client"] != self._state.get("client")
         ):
-            self._state = data
+            self._adopt_state(data)
         return False
 
     # ------------------------------------------------------------ auth-steg

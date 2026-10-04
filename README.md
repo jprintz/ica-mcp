@@ -177,6 +177,10 @@ public in that project), not user secrets.
 - **No `keyring` dependency by design.** The Swedish-egress requirement pushes
   many users onto headless homelab/VPS boxes that lack a Secret Service /
   Credential Manager; a portable `0600` file is the deliberate choice.
+- **The newest login wins.** A running server re-reads the cache before it
+  refreshes, so if you run `ica-mcp login` with a different ICA account, the
+  server switches to that account (and logs a warning) instead of overwriting
+  your new login. Use separate `ICA_STATE_FILE`s to run two accounts side by side.
 - Nothing is logged to stdout (stdout is reserved for the MCP protocol — logs go
   to stderr).
 - This server can **modify your real ICA account** (add/remove items, delete

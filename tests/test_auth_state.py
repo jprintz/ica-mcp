@@ -128,3 +128,43 @@ def test_missing_location_raises_auth_error(tmp_path, monkeypatch):
     monkeypatch.setattr(cl.session, "get", lambda *a, **k: R())
     with pytest.raises(IcaAuthError, match="redirect"):
         cl._full_login()
+
+
+def _idt(sub):
+    import jwt
+    return jwt.encode({"sub": sub}, "test-nyckel-som-är-lång-nog-för-hs256", algorithm="HS256")
+
+
+def test_same_account_is_adopted_silently(tmp_path, monkeypatch, caplog):
+    client = {"client_id": "x", "client_secret": "y"}
+    a = _mk(tmp_path)
+    a._state = {"client": client, "token": {**_tok("old", minutes=-5), "id_token": _idt("A")}}
+    a._save_state()
+    b = _mk(tmp_path)
+    b._state = {"client": client, "token": {**_tok("new", "r2"), "id_token": _idt("A")}}
+    b._save_state()
+    monkeypatch.setattr(a.session, "post", _no_http)
+    with caplog.at_level("WARNING", logger="ica_mcp.client"):
+        assert a._access_token() == "new"
+    assert "annat ICA-konto" not in caplog.text
+
+
+def test_other_account_wins_with_warning(tmp_path, monkeypatch, caplog):
+    # Den senaste inloggningen vinner (annars skrivs den över vid nästa
+    # refresh), men bytet ska synas i loggen.
+    a = _mk(tmp_path)
+    a._state = {"client": {"client_id": "a"}, "token": {**_tok("tokA", minutes=-5), "id_token": _idt("A")}}
+    a._save_state()
+    b = _mk(tmp_path)
+    b._state = {"client": {"client_id": "b"}, "token": {**_tok("tokB", "rB"), "id_token": _idt("B")}}
+    b._save_state()
+    monkeypatch.setattr(a.session, "post", _no_http)
+    with caplog.at_level("WARNING", logger="ica_mcp.client"):
+        assert a._access_token() == "tokB"
+    assert "annat ICA-konto" in caplog.text
+    assert IcaClient._account_of(a._state) == "B"
+
+
+def test_account_of_without_id_token():
+    assert IcaClient._account_of({}) is None
+    assert IcaClient._account_of({"token": {"id_token": "inte-en-jwt"}}) is None
