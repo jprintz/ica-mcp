@@ -91,7 +91,8 @@ def _resolve_rows(list_obj: dict, item: str, unstruck_only: bool = False) -> lis
 class Item(BaseModel):
     """En vara med valfri mängd och enhet."""
     name: str = Field(description="Varans namn utan mängd, t.ex. 'grädde'")
-    quantity: float | None = Field(None, description="Mängd, t.ex. 2 eller 1.5")
+    quantity: float | None = Field(None, gt=0, le=10_000, allow_inf_nan=False,
+                                   description="Mängd större än 0, t.ex. 2 eller 1.5")
     unit: Unit | None = Field(
         None, description="Enhet. Använd st för styck/burk/påse/flaska o.d.; "
                           "mängd utan enhet blir st.")
