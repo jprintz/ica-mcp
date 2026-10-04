@@ -248,6 +248,18 @@ def to_item(it) -> dict:
     return out
 
 
+def recipe_id_of(recipe: dict) -> int | None:
+    """Receptets id som int — även om ICA skickar det som sträng ('123')."""
+    rid = recipe.get("id")
+    if isinstance(rid, bool):
+        return None
+    if isinstance(rid, int):
+        return rid
+    if isinstance(rid, str) and rid.strip().isdigit():
+        return int(rid)
+    return None
+
+
 def add_recipe_share(item: dict, recipe_id: int, quantity, unit) -> None:
     """Lägg till ett recepts andel av varan i item["recipes"] — ICA:s format
     [{id, quantity, unit?}], som appen visar under "Tillagd från recept" (bild,
@@ -777,8 +789,8 @@ class IcaClient:
         pekar ibland på en för grov produkt ('krossade tomater' → 'tomat')."""
         groups: dict[tuple, dict] = {}
         for r in recipes:
-            rid = r.get("id")
-            is_rid = isinstance(rid, int) and not isinstance(rid, bool)
+            rid = recipe_id_of(r)
+            is_rid = rid is not None
             for grp in r.get("ingredientGroups", []):
                 for ing in grp.get("ingredients", []):
                     name = (ing.get("ingredient") or "").strip()
