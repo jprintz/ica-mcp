@@ -296,7 +296,7 @@ def test_link_without_suggestions_skips_search(tmp_path, monkeypatch):
 def test_link_without_catalog(tmp_path):
     items = _items({"name": "mjölk"})
     res = _Client(tmp_path, fetch=_Fetch(IcaError("451"))).link_products(items)
-    assert res == {"available": False, "linked": 0, "unlinked": []}
+    assert res == {"available": False, "linked": 0, "unlinked": [], "explicit": [], "fallback": []}
     assert "product" not in items[0]
 
 
@@ -476,3 +476,67 @@ def test_row_view_shows_category():
     assert server._row_view({"productName": "m", "articleGroupId": 10})["category"] == "Mejeri"
     assert server._row_view({"productName": "x"})["category"] == "Ospecificerad"
     assert server._row_view({"productName": "x", "articleGroupId": 12})["category"] == "Ospecificerad"
+
+
+
+# ------------------------------------------------------------ granskningsfynd
+def test_no_cache_failure_retries_soon(tmp_path, clock):
+    f = _Fetch(ConnectionError("nere"))
+    pc = ProductCache(f, path=str(tmp_path / "p.json"))
+    assert pc.get() is None and f.calls == 1
+    clock["now"] += products.RETRY_WITHOUT_CACHE + dt.timedelta(seconds=1)
+    f.result = ARTS
+    assert pc.get().match("mjölk") and f.calls == 2  # inte 30 min utan sortering
+
+
+def test_bad_article_ids_are_dropped_not_fatal(tmp_path, clock):
+    arts = ARTS + [{**_a(1, "x"), "id": "abc"}, {**_a(2, "y"), "id": None}, {**_a(3, "z"), "id": True}]
+    c = ProductCache(_Fetch(arts), path=str(tmp_path / "p.json")).get()
+    assert c.match("mjölk") and not c.match("x") and not c.match("y") and not c.match("z")
+
+
+def test_catalog_build_failure_degrades(tmp_path, clock, monkeypatch):
+    def boom(articles):
+        raise TypeError("trasig data")
+    monkeypatch.setattr(products, "ProductCatalog", boom)
+    assert ProductCache(_Fetch(), path=str(tmp_path / "p.json")).get() is None
+
+
+@pytest.mark.parametrize("fetched", ["2026-10-04T11:00:00", "2099-01-01T00:00:00+00:00"])
+def test_naive_or_future_disk_timestamp_is_stale(tmp_path, clock, fetched):
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps({"version": 1, "fetched": fetched,
+                                "articles": [trim_article(a) for a in ARTS]}), encoding="utf-8")
+    f = _Fetch()
+    assert ProductCache(f, path=str(path)).get().match("mjölk") and f.calls == 1
+
+
+def test_explicit_product_id_is_reported(fake):
+    msg = server.add_items([server.Item(name="diskmedel", product_id=11103)])
+    assert "Kopplade via product_id: diskmedel → mjölk (Mejeri)" in msg
+
+
+def test_recipe_fallback_links_are_reported(fake, monkeypatch):
+    recipe = {"id": 1, "title": "Gryta", "ingredientGroups": [{"ingredients": [
+        {"ingredient": "körsbärstomater på burk", "quantity": 2, "ingredientId": 11706}]}]}
+    monkeypatch.setattr(fake, "get_recipe", lambda rid: recipe, raising=False)
+    msg = server.add_recipe_to_shopping_list(1)
+    assert "ingrediens-id" in msg and "körsbärstomater på burk → tomat (Frukt & Grönt)" in msg
+
+
+def test_link_item_product_without_section_sends_no_nulls(fake):
+    catalog = fake.product_catalog()
+    catalog.by_id[424242] = {"id": 424242, "name": "konstig", "parentId": None,
+                             "parentIdExtended": None, "status": 2}
+    fake.rows = [{"productName": "x", "offlineId": "A", "sourceId": -5}]
+    server.link_item("x", product_id=424242)
+    (row,) = fake.synced[0]["changedRows"]
+    assert row["sourceId"] == 424242 and "articleGroupId" not in row
+
+
+def test_barcode_uses_lookup_section_when_catalog_misses(fake, monkeypatch):
+    monkeypatch.setattr(fake, "get_product", lambda ean: {
+        "name": "Okänd Glass", "articleId": 777777, "articleGroupId": 5, "gtin": ean}, raising=False)
+    server.add_product_to_shopping_list("7310865004703")
+    row = fake.synced[0]["createdRows"][0]
+    assert row["sourceId"] < 0 and row["articleGroupId"] == 5  # Djupfryst

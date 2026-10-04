@@ -47,7 +47,8 @@ UNSPECIFIED = 12
 ARTICLE_GROUPS: dict[int, str] = {**{v: k for k, v in CATEGORY_IDS.items()},
                                   UNSPECIFIED: "Ospecificerad"}
 CACHE_TTL = dt.timedelta(hours=24)
-RETRY_AFTER_FAILURE = dt.timedelta(minutes=30)
+RETRY_AFTER_FAILURE = dt.timedelta(minutes=30)  # med äldre cache att falla tillbaka på
+RETRY_WITHOUT_CACHE = dt.timedelta(minutes=2)   # utan cache: försök snart igen
 ACTIVE = 2  # status på produkterna som ICA-appen själv använder
 _CACHE_VERSION = 1
 _FIELDS = ("id", "name", "pluralName", "parentId", "parentIdExtended", "status")
@@ -212,14 +213,17 @@ class ProductCache:
             if self._next_try is not None and now < self._next_try:
                 return self._catalog  # gammal cache eller None
             try:
-                articles = [trim_article(a) for a in self._fetch()]
+                articles = [t for t in map(trim_article, self._fetch())
+                            if isinstance(t["id"], int) and not isinstance(t["id"], bool)]
                 if not articles:
                     raise ValueError("tomt produktregister")
+                catalog = ProductCatalog(articles)
             except Exception as e:  # noqa: BLE001 — nätverk, 451, auth, ogiltigt svar
                 _LOG.warning("Kunde inte hämta produktregistret: %s", e)
-                self._next_try = now + RETRY_AFTER_FAILURE
+                self._next_try = now + (RETRY_AFTER_FAILURE if self._catalog is not None
+                                        else RETRY_WITHOUT_CACHE)
                 return self._catalog
-            self._catalog, self._fetched, self._next_try = ProductCatalog(articles), now, None
+            self._catalog, self._fetched, self._next_try = catalog, now, None
             self._save_disk(articles, now)
             return self._catalog
 
@@ -233,6 +237,8 @@ class ProductCache:
             catalog = ProductCatalog(data["articles"])
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return  # saknas eller trasig — hämtas på nytt
+        if fetched.tzinfo is None or fetched > _now():
+            fetched = dt.datetime.min.replace(tzinfo=dt.timezone.utc)  # oklar ålder → inaktuell
         if len(catalog):
             self._catalog, self._fetched = catalog, fetched
 

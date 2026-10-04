@@ -276,6 +276,15 @@ def format_item(it: dict) -> str:
     return " ".join(p for p in (format_quantity(it["quantity"]), it.get("unit"), it["name"]) if p)
 
 
+def apply_product(row: dict, p: dict) -> None:
+    """Koppla en rad till ICA-produkten p (som när man väljer ett förslag i
+    appen). Avdelningen sätts bara om produkten har en — aldrig null."""
+    row["sourceId"] = p["id"]
+    if p.get("parentId"):
+        row["articleGroupId"] = p["parentId"]
+        row["articleGroupIdExtended"] = p.get("parentIdExtended") or p["parentId"]
+
+
 class IcaClient:
     """Trådsäker(ish) klient. En instans per konto."""
 
@@ -559,12 +568,8 @@ class IcaClient:
                 "isStrikedOver": False,
                 "recipes": it.get("recipes") or [],
             }
-            p = it.get("product")
-            if p:
-                row["sourceId"] = p["id"]
-                if p.get("parentId"):
-                    row["articleGroupId"] = p["parentId"]
-                    row["articleGroupIdExtended"] = p.get("parentIdExtended") or p["parentId"]
+            if it.get("product"):
+                apply_product(row, it["product"])
             elif it.get("category"):
                 row["articleGroupId"] = row["articleGroupIdExtended"] = CATEGORY_IDS[it["category"]]
             if it.get("quantity") is not None:
@@ -608,16 +613,23 @@ class IcaClient:
         gissning — omatchade varor returneras, med förslag om de saknar
         category (annars hamnar de under Ospecificerad).
         Returnerar {available, linked, unlinked: [{name, reason?, category?,
-        suggestions}]}."""
+        suggestions}], explicit: [{name, product}], fallback: [{name, product}]}
+        — explicit/fallback är kopplingar via product_id resp. ingredientId,
+        som ska redovisas eftersom namnet inte styrkte dem."""
         catalog = self.product_catalog()
         if catalog is None:
-            return {"available": False, "linked": 0, "unlinked": []}
-        linked, unlinked = 0, []
+            return {"available": False, "linked": 0, "unlinked": [], "explicit": [], "fallback": []}
+        linked, unlinked, explicit, via_fallback = 0, [], [], []
         for it in items:
             pid = it.pop("product_id", None)
             fallback = it.pop("fallback_product_id", None)
-            p = ((catalog.get(pid) if pid else None) or catalog.match(it["name"])
-                 or (catalog.get(fallback) if fallback else None))
+            p = catalog.get(pid) if pid else None
+            if p:
+                explicit.append({"name": it["name"], "product": p})
+            else:
+                p = catalog.match(it["name"])
+            if not p and fallback and (p := catalog.get(fallback)):
+                via_fallback.append({"name": it["name"], "product": p})
             if p:
                 it["product"] = p
                 linked += 1
@@ -630,7 +642,8 @@ class IcaClient:
             if pid:
                 entry["reason"] = f"okänt produkt-id {pid}"
             unlinked.append(entry)
-        return {"available": True, "linked": linked, "unlinked": unlinked}
+        return {"available": True, "linked": linked, "unlinked": unlinked,
+                "explicit": explicit, "fallback": via_fallback}
 
     # ---------------------------------------------------- resolvers
     def resolve_list(self, ref: str | int | None = None, exact: bool = False) -> dict:
@@ -828,9 +841,14 @@ class IcaClient:
 
     def store_id_for(self, ref=None) -> int:
         """Butiks-id för en ny lista: favoritbutiken ref (id eller namn), annars
-        den primära (första favoriten). 0 = ingen butik (inga favoritbutiker)."""
+        den primära (första favoriten). 0 = ingen butik (inga favoritbutiker,
+        eller standardbutiken kunde inte hämtas — då skapas listan ändå)."""
         if ref is None or str(ref).strip() == "":
-            ids = self.get_favorite_store_ids()
+            try:
+                ids = self.get_favorite_store_ids()
+            except IcaError as e:
+                _LOG.warning("Kunde inte hämta favoritbutik, skapar listan utan butik: %s", e)
+                return 0
             return int(ids[0]) if ids else 0
         return int(self.resolve_store(ref)["id"])
 
