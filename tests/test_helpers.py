@@ -74,9 +74,9 @@ def test_aggregate_keeps_unknown_unit_in_name():
                  {"ingredient": "salt", "quantity": 1, "unit": "nypa"})
     r2 = _recipe({"ingredient": "vitlök", "quantity": 2, "unit": "klyftor"})
     assert IcaClient.aggregate_ingredients([r1, r2]) == [
-        {"name": "vitlök (5 klyftor)", "quantity": None, "unit": None},
+        {"name": "vitlök (5 klyftor)", "quantity": None, "unit": None, "amount_in_name": True},
         {"name": "vitlök", "quantity": 1.0, "unit": "st"},
-        {"name": "salt (1 nypa)", "quantity": None, "unit": None}]
+        {"name": "salt (1 nypa)", "quantity": None, "unit": None, "amount_in_name": True}]
 
 
 def test_aggregate_text_fallback_has_no_extra_quantity():

@@ -28,6 +28,7 @@ import random
 import re
 import shutil
 import threading
+import unicodedata
 import uuid
 from os import urandom
 from typing import Literal, get_args
@@ -245,6 +246,9 @@ def to_item(it) -> dict:
         out["product"] = it["product"]
     if isinstance(it.get("recipes"), list):
         out["recipes"] = [dict(r) for r in it["recipes"] if isinstance(r, dict) and r.get("id")]
+    for flag in ("weak_link", "amount_in_name"):  # se _same_item
+        if it.get(flag) is True:
+            out[flag] = True
     return out
 
 
@@ -274,6 +278,170 @@ def add_recipe_share(item: dict, recipe_id: int, quantity, unit) -> None:
     if unit:
         share["unit"] = unit
     shares.append(share)
+
+
+def _new_row(it: dict) -> dict:
+    """En ny rad för /sync createdRows (se IcaClient.add_rows)."""
+    row = {
+        "offlineId": str(uuid.uuid4()).upper(),
+        "productName": it["name"],
+        "sourceId": -random.randint(10**6, 10**9),  # negativ = fri text
+        "isStrikedOver": False,
+        "recipes": it.get("recipes") or [],
+    }
+    if it.get("product"):
+        apply_product(row, it["product"])
+    elif it.get("category"):
+        row["articleGroupId"] = row["articleGroupIdExtended"] = CATEGORY_IDS[it["category"]]
+    if it.get("quantity") is not None:
+        row["quantity"] = float(it["quantity"])
+    if it.get("unit"):
+        row["unit"] = it["unit"]
+    return row
+
+
+# --------------------------------------------------------------------------
+# En rad per vara: slå ihop med det som redan finns på listan
+# --------------------------------------------------------------------------
+# Enheter som kan räknas om: volym via ml, vikt via g. st/förp räknas aldrig om.
+_UNIT_FACTORS = {"ml": ("volym", 1), "krm": ("volym", 1), "tsk": ("volym", 5), "msk": ("volym", 15),
+                 "cl": ("volym", 10), "dl": ("volym", 100), "l": ("volym", 1000),
+                 "g": ("vikt", 1), "hg": ("vikt", 100), "kg": ("vikt", 1000)}
+
+
+def merge_quantities(q1, u1, q2, u2) -> tuple | None:
+    """Summera två mängder. Samma enhet → summan; samma slags enhet (volym,
+    vikt) → summan i den större enheten om den blir exakt med tre decimaler
+    (2 msk + 1 dl → 1.3 dl), annars i den mindre (1 kg + 0,5 g → 1000,5 g);
+    saknas mängd på ena sidan → den andra. None om enheterna inte går ihop
+    (g och st)."""
+    if not q2:
+        return q1, u1
+    if not q1:
+        return q2, u2
+    if u1 == u2:
+        return round(q1 + q2, 3), u1
+    f1, f2 = _UNIT_FACTORS.get(u1), _UNIT_FACTORS.get(u2)
+    if not f1 or not f2 or f1[0] != f2[0]:
+        return None
+    (big, fb), (small, fs) = sorted([(u1, f1[1]), (u2, f2[1])], key=lambda x: -x[1])
+    total = q1 * f1[1] + q2 * f2[1]
+    in_big = round(total / fb, 3)
+    if abs(in_big * fb - total) < 1e-9 * max(1.0, total):
+        return in_big, big
+    return round(total / fs, 3), small
+
+
+def _norm_name(name: str) -> str:
+    return " ".join(unicodedata.normalize("NFC", name).casefold().split())
+
+
+def _trusted_link(it: dict) -> bool:
+    """En koppling som räcker för att slå ihop varor med olika namn. Inte:
+    receptets grova ingredientId ('körsbärstomater på burk' → 'tomat'), en
+    vara vars mängd står i namnet ('vitlök (3 klyftor)' – mängden skulle
+    försvinna i en st-rad) eller en rad vars namn inte motsvarar produkten."""
+    return not (it.get("weak_link") or it.get("amount_in_name"))
+
+
+def _same_item(a: dict, b: dict) -> bool:
+    """Samma vara: samma ICA-produkt om båda har en pålitlig koppling (se
+    _trusted_link), annars samma namn (skiftläge, mellanslag och
+    Unicode-form spelar ingen roll). Två olika produkter med samma namn räknas
+    inte som samma vara."""
+    pa, pb = (a.get("product") or {}).get("id"), (b.get("product") or {}).get("id")
+    if pa and pb and _trusted_link(a) and _trusted_link(b):
+        return pa == pb
+    return _norm_name(a["name"]) == _norm_name(b["name"])
+
+
+def _row_as_item(row: dict, catalog=None) -> dict:
+    """En befintlig rad i samma form som to_item (för jämförelse/sammanslagning).
+    Appen lämnar enheten tom för styckvaror ('4 tomater') — det motsvarar 'st'.
+    Med catalog räknas radens produktkoppling som pålitlig bara om radens
+    namn matchar samma produkt — en rad som kopplades via receptets
+    ingredientId ('körsbärstomater på burk' → tomat) ska inte svälja 'tomater'."""
+    q = _to_number(row.get("quantity"))
+    try:
+        unit = (normalize_unit(row.get("unit")) or "st") if q else None
+    except ValueError:  # enhet som appen satt men vi inte känner till
+        unit = str(row.get("unit"))
+    it = {"name": str(row.get("productName") or ""), "quantity": q, "unit": unit,
+          "recipes": [{"id": s["id"], "quantity": _to_number(s.get("quantity")) or 0.0,
+                       **({"unit": s["unit"]} if s.get("unit") else {})}
+                      for s in row.get("recipes") or [] if isinstance(s, dict) and s.get("id")]}
+    src = row.get("sourceId") or 0
+    if src > 0:
+        it["product"] = {"id": src}
+        if catalog is not None and (catalog.match(it["name"]) or {}).get("id") != src:
+            it["weak_link"] = True
+    return it
+
+
+def _merge_item(target: dict, it: dict) -> bool:
+    """Slå ihop it i target (båda i to_item-form). False om enheterna inte går ihop."""
+    qu = merge_quantities(target["quantity"], target["unit"], it["quantity"], it["unit"])
+    if qu is None:
+        return False
+    target["quantity"], target["unit"] = qu
+    for s in it.get("recipes") or []:
+        add_recipe_share(target, s["id"], s.get("quantity"), s.get("unit"))
+    if not target.get("product") and it.get("product"):
+        target["product"] = it["product"]  # fritextrad får produktkoppling
+    elif not target.get("product") and not target.get("category") and it.get("category"):
+        target["category"] = it["category"]
+    return True
+
+
+def plan_additions(rows: list[dict], items: list[dict], catalog=None) -> tuple[list, list, list]:
+    """Planera att lägga till items (to_item-form, ev. kopplade) på en lista
+    med raderna rows, så att varje vara bara har en rad: en vara som redan
+    finns (ej avbockad, se _same_item) och har kompatibel enhet ökar den raden
+    i stället för att bli en ny. Dubbletter inom items slås också ihop.
+    catalog (ProductCatalog) avgör om befintliga raders produktkoppling är
+    pålitlig, se _row_as_item. Returnerar (nya varor, ändrade rader,
+    [{name, before, after, items, unsorted}]) — items är de tillagda varornas
+    namn, unsorted att raden fortfarande saknar avdelning."""
+    cands: list[tuple[dict, dict | None]] = []   # (vy i to_item-form, ev. befintlig rad)
+    for r in rows:
+        if not r.get("isStrikedOver") and r.get("productName"):
+            cands.append((_row_as_item(r, catalog), r))
+    new: list[dict] = []
+    touched: dict[str, tuple[dict, dict, str, list]] = {}  # offlineId → (rad, vy, före, varor)
+    for it in items:
+        for view, row in cands:
+            if not _same_item(view, it):
+                continue
+            before = format_item(view)
+            if not _merge_item(view, it):
+                continue
+            if row is not None:
+                touched.setdefault(row["offlineId"], (row, view, before, []))[3].append(it["name"])
+            break
+        else:
+            new.append(it)
+            cands.append((it, None))
+    changed, merges = [], []
+    for original, view, before, names in touched.values():
+        row = dict(original)
+        if view["quantity"]:
+            row["quantity"] = float(view["quantity"])
+            if not (row.get("unit") is None and view["unit"] == "st"):
+                row["unit"] = view["unit"]
+        row["recipes"] = view.get("recipes") or []
+        p = view.get("product")
+        if p and p.get("parentId") and (row.get("sourceId") or 0) <= 0:
+            row["sourceId"] = p["id"]
+            row["articleGroupId"] = p["parentId"]
+            row["articleGroupIdExtended"] = p.get("parentIdExtended") or p["parentId"]
+        elif view.get("category") and row.get("articleGroupId") in (None, 12):
+            row["articleGroupId"] = row["articleGroupIdExtended"] = CATEGORY_IDS[view["category"]]
+        if row != {**original, "recipes": original.get("recipes") or []}:
+            changed.append(row)  # oförändrad rad (t.ex. samma streckkod igen) skrivs inte
+        unsorted = (row.get("sourceId") or 0) <= 0 and row.get("articleGroupId") in (None, 12)
+        merges.append({"name": row["productName"], "before": before, "after": format_item(view),
+                       "items": names, "unsorted": unsorted})
+    return new, changed, merges
 
 
 def format_quantity(q: float) -> str:
@@ -568,30 +736,43 @@ class IcaClient:
         (se to_item). En vara med product (från link_products) kopplas till
         ICA-produkten som när man väljer ett förslag i appen; annars läggs den
         till som fritext, i avdelningen category om den finns (annars hamnar
-        den under Ospecificerad). recipes blir radens "Tillagd från recept"."""
-        rows = []
-        for it in map(to_item, items):
-            if not it["name"]:
-                continue
-            row = {
-                "offlineId": str(uuid.uuid4()).upper(),
-                "productName": it["name"],
-                "sourceId": -random.randint(10**6, 10**9),  # negativ = fri text
-                "isStrikedOver": False,
-                "recipes": it.get("recipes") or [],
-            }
-            if it.get("product"):
-                apply_product(row, it["product"])
-            elif it.get("category"):
-                row["articleGroupId"] = row["articleGroupIdExtended"] = CATEGORY_IDS[it["category"]]
-            if it.get("quantity") is not None:
-                row["quantity"] = float(it["quantity"])
-            if it.get("unit"):
-                row["unit"] = it["unit"]
-            rows.append(row)
+        den under Ospecificerad). recipes blir radens "Tillagd från recept".
+        Skapar alltid nya rader — se add_or_merge för en rad per vara."""
+        rows = [_new_row(it) for it in map(to_item, items) if it["name"]]
         if not rows:
             raise IcaError("Inga varor att lägga till.")
         return self._sync(offline_id, {"createdRows": rows})
+
+    def add_or_merge(self, offline_id: str, items: list, merge: bool = True) -> dict:
+        """Lägg till varor så att varje vara bara har en rad på listan: en vara
+        som redan finns (se plan_additions) ökar den raden, övriga blir nya
+        rader. merge=False: alltid nya rader. Allt skrivs i ett /sync-anrop
+        (verifierat mot ICA: createdRows och changedRows går i samma anrop).
+        Listan läses direkt före skrivningen, men ändras en rad i appen i just
+        det fönstret skrivs den ändå över med vår version. Returnerar
+        {created, merged}."""
+        items = [it for it in map(to_item, items) if it["name"]]
+        if not items:
+            raise IcaError("Inga varor att lägga till.")
+        if not merge:
+            self._sync(offline_id, {"createdRows": [_new_row(it) for it in items]})
+            return {"created": items, "merged": []}
+        # bara en redan laddad katalog (link_products) — ingen ny hämtning här
+        cache = getattr(self, "_products", None)
+        catalog = cache.get() if cache is not None else None
+        rows = self.get_list_raw(offline_id).get("rows", [])
+        new, changed, merges = plan_additions(rows, items, catalog)
+        payload: dict = {}
+        if not new and not changed:
+            return {"created": [], "merged": merges}  # inget att skriva
+        if new:
+            payload["createdRows"] = [_new_row(it) for it in new]
+        if changed:
+            for r in changed:
+                r["latestChange"] = _ts()
+            payload["changedRows"] = changed
+        self._sync(offline_id, payload)
+        return {"created": new, "merged": merges}
 
     def change_rows(self, offline_id: str, rows: list[dict]) -> dict:
         for r in rows:
@@ -642,6 +823,7 @@ class IcaClient:
                 p = catalog.match(it["name"])
             if not p and fallback and (p := catalog.get(fallback)):
                 via_fallback.append({"name": it["name"], "product": p})
+                it["weak_link"] = True  # grov koppling: sorterar, men slår aldrig ihop
             if p:
                 it["product"] = p
                 linked += 1
@@ -772,9 +954,10 @@ class IcaClient:
     @staticmethod
     def aggregate_ingredients(recipes: list[dict]) -> list[dict]:
         """Slå ihop ingredienser från ett eller flera recept till varor
-        {name, quantity, unit} (se to_item). Samma namn + samma enhet summeras
-        (2 dl + 3 dl mjölk → 5 dl mjölk); olika enheter blir separata varor.
-        Varor utan mängd (salt) tas med en gång. Ordningen bevaras. Varje
+        {name, quantity, unit} (se to_item). Samma namn summeras, med
+        omräkning mellan enheter av samma slag (2 msk + 1 dl olja → 1.3 dl,
+        se merge_quantities); enheter som inte går ihop (g och st) blir
+        separata varor. Varor utan mängd (salt) tas med en gång. Ordningen bevaras. Varje
         recepts andel sparas i recipes (se add_recipe_share), så att appen
         visar varför varan finns på listan.
 
@@ -787,7 +970,8 @@ class IcaClient:
         ingredientId följer med som fallback_product_id: det används bara om
         namnet inte matchar en produkt, och aldrig för sammanslagning — det
         pekar ibland på en för grov produkt ('krossade tomater' → 'tomat')."""
-        groups: dict[tuple, dict] = {}
+        items: list[dict] = []
+        raw_groups: dict[tuple, dict] = {}  # (namn, okänd enhet) → vara
         for r in recipes:
             rid = recipe_id_of(r)
             is_rid = rid is not None
@@ -797,10 +981,11 @@ class IcaClient:
                     if not name:
                         text = (ing.get("text") or "").strip()
                         if text:
-                            g = groups.setdefault((text.lower(), None), to_item(
-                                {"name": text, "fallback_product_id": ing.get("ingredientId")}))
+                            it = to_item({"name": text,
+                                          "fallback_product_id": ing.get("ingredientId")})
                             if is_rid:
-                                add_recipe_share(g, rid, None, None)
+                                add_recipe_share(it, rid, None, None)
+                            items.append(it)
                         continue
                     unit = ing.get("unit")
                     first, _, rest = name.partition(" ")
@@ -810,27 +995,27 @@ class IcaClient:
                     try:
                         it = to_item({"name": name, "quantity": ing.get("quantity"), "unit": unit,
                                       "fallback_product_id": fallback})
-                        key = (name.lower(), it["unit"])
                     except ValueError:
+                        # okänd enhet: summera per enhet, mängden hamnar i namnet nedan
                         raw = str(unit).strip()
-                        it = to_item({"name": name, "fallback_product_id": fallback})
-                        it.update(quantity=_to_number(ing.get("quantity")), _raw_unit=raw)
-                        key = (name.lower(), "raw:" + raw.lower())
-                    g = groups.setdefault(key, it)
-                    if g is not it and it["quantity"]:
-                        g["quantity"] = round((g["quantity"] or 0) + it["quantity"], 3)
+                        g = raw_groups.get((name.lower(), raw.lower()))
+                        if g is None:
+                            g = to_item({"name": name, "fallback_product_id": fallback})
+                            g["_raw"] = [raw, 0.0]
+                            g["amount_in_name"] = True
+                            raw_groups[(name.lower(), raw.lower())] = g
+                            items.append(g)
+                        g["_raw"][1] = round(g["_raw"][1] + (_to_number(ing.get("quantity")) or 0), 3)
+                        if is_rid:
+                            add_recipe_share(g, rid, None, None)
+                        continue
                     if is_rid:
-                        # okänd enhet: mängden står i namnet, inte i andelen
-                        q = None if "_raw_unit" in it else it["quantity"]
-                        add_recipe_share(g, rid, q, it["unit"])
-        out = []
-        for g in groups.values():
-            raw = g.pop("_raw_unit", None)
-            if raw is not None:
-                g = {**g, "name": f"{g['name']} ({format_quantity(g['quantity'])} {raw})",
-                     "quantity": None}
-            out.append(g)
-        return out
+                        add_recipe_share(it, rid, it["quantity"], it["unit"])
+                    items.append(it)
+        for g in raw_groups.values():
+            raw, q = g.pop("_raw")
+            g["name"] = f"{g['name']} ({format_quantity(q)} {raw})"
+        return plan_additions([], items)[0]
 
     # ---------------------------------------------------- butiker
     def get_favorite_store_ids(self) -> list[int]:

@@ -110,6 +110,7 @@ def test_plan_dinners_notes_ignored_store_for_existing_list(monkeypatch):
     c = _Fake(lists=[{"title": "Veckans middagar", "offlineId": "X"}])
     c.get_random_recipes = lambda n: [{"id": 1, "title": "Soppa", "ingredientGroups": []}]
     c.add_rows = lambda oid, items: None
+    c.add_or_merge = lambda oid, items, merge=True: {"created": items, "merged": []}
     monkeypatch.setattr(server, "client", lambda: c)
     out = server.plan_dinners(1, store_name="Willys")
     assert "oförändrad" in out["note"]

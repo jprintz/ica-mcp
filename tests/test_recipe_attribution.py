@@ -67,6 +67,9 @@ class _Recorder(IcaClient):
     def get_recipe(self, rid):
         return self.recipes[rid]
 
+    def get_list_raw(self, offline_id):
+        return {"title": "Handla", "offlineId": offline_id, "rows": []}
+
     def _sync(self, offline_id, payload):
         self.synced.append(payload)
         return {}
