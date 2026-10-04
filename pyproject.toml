@@ -33,6 +33,7 @@ packages = ["ica_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
 
 [tool.hatch.version]
 path = "ica_mcp/__init__.py"
