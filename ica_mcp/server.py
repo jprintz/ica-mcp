@@ -41,9 +41,6 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import IcaClient, IcaError
 
-# Logga till stderr (stdout är reserverat för MCP-protokollet!)
-logging.basicConfig(level=logging.INFO, stream=sys.stderr,
-                    format="%(levelname)s %(name)s: %(message)s")
 _LOG = logging.getLogger("ica_mcp")
 
 mcp = FastMCP("ICA")
@@ -385,6 +382,9 @@ def plan_dinners(count: int = 5, list_name: str | None = None) -> dict:
 
 def serve() -> None:
     """Starta MCP-servern (stdio). Anropas av `ica-mcp serve`."""
+    # Logga till stderr (stdout är reserverat för MCP-protokollet!)
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                        format="%(levelname)s %(name)s: %(message)s")
     mcp.run()
 
 
