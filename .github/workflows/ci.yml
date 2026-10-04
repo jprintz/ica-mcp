@@ -23,3 +23,20 @@ jobs:
         run: python -m compileall ica_mcp
       - name: Unit tests (offline helpers only — live API needs a Swedish IP)
         run: pytest -q
+
+  # Kör testerna mot lägsta tillåtna mcp-version så att golvet i pyproject hålls ärligt.
+  test-min-mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install with the lowest supported mcp
+        run: |
+          pip install ".[test]"
+          MIN=$(grep -oE 'mcp>=[0-9.]+' pyproject.toml | cut -d= -f2)
+          pip install "mcp==$MIN"
+          python -c "import mcp, importlib.metadata as m; print('mcp', m.version('mcp'))"
+      - name: Unit tests
+        run: pytest -q
