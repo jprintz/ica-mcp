@@ -62,3 +62,23 @@ def test_resolve_or_create_list_sets_store_only_when_creating():
     assert c.posted == []  # befintlig lista — ingen butik ändras
     L = _Fake().resolve_or_create_list("Veckans middagar", "nära")
     assert L["sortingStore"] == 1234
+
+
+def test_default_store_lookup_failure_still_creates_list():
+    class _Down(_Fake):
+        def get_favorite_store_ids(self):
+            raise IcaError("HTTP 503")
+    assert _Down().store_id_for() == 0
+    with pytest.raises(IcaError):  # en uttryckligen angiven butik ska fortfarande ge fel
+        _Down(favorites=()).store_id_for("nära")
+
+
+def test_plan_dinners_notes_ignored_store_for_existing_list(monkeypatch):
+    from ica_mcp import server
+    c = _Fake(lists=[{"title": "Veckans middagar", "offlineId": "X"}])
+    c.get_random_recipes = lambda n: [{"id": 1, "title": "Soppa", "ingredientGroups": []}]
+    c.add_rows = lambda oid, items: None
+    monkeypatch.setattr(server, "client", lambda: c)
+    out = server.plan_dinners(1, store_name="Willys")
+    assert "oförändrad" in out["note"] and c.posted == []
+    assert "note" not in server.plan_dinners(1)  # ingen store_name → ingen anmärkning

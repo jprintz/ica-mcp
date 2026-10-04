@@ -424,14 +424,22 @@ def plan_dinners(count: int = 5, list_name: str | None = None,
     if not recipes:
         return {"error": "Kunde inte hämta recept."}
     items = IcaClient.aggregate_ingredients(recipes)
-    L = c.resolve_or_create_list(list_name or "Veckans middagar", store_name)
+    name = list_name or "Veckans middagar"
+    # store_name gäller bara en ny lista — säg till om den inte användes
+    existed = bool(store_name) and any(
+        L.get("title", "").lower() == name.strip().lower() for L in c.get_lists())
+    L = c.resolve_or_create_list(name, store_name)
     c.add_rows(L["offlineId"], items)
-    return {
+    out = {
         "list": L.get("title"),
         "dinners": [{"id": r.get("id"), "title": r.get("title"),
                      "cookingTime": r.get("cookingTime")} for r in recipes],
         "ingredients_added": len(items),
     }
+    if existed:
+        out["note"] = (f"Listan '{L.get('title')}' fanns redan, så store_name användes "
+                       "inte — listans butik är oförändrad.")
+    return out
 
 
 def serve() -> None:
