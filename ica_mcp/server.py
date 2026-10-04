@@ -5,7 +5,7 @@ ICA MCP-server (stdio) — låter agenter läsa och redigera dina ICA-inköpslis
 Verktyg:
   list_shopping_lists   – alla dina listor + hur många varor kvar/avbockade
   view_shopping_list    – innehållet i en lista
-  add_items             – lägg till varor (namn, mängd, enhet) på en lista
+  add_items             – lägg till varor (namn, mängd, enhet); befintliga varor ökas
   link_item             – sortera en vara (ICA-produkt eller avdelning)
   check_off / uncheck   – bocka av / ångra en vara
   remove_item           – ta bort en vara helt
@@ -83,6 +83,22 @@ def _row_view(row: dict) -> dict:
 
 _SORT_HINT = ("Sortera dem med link_item: product_id från förslagen (eller "
               "search_products), eller en category (avdelning).")
+
+
+def _merge_note(added: dict) -> str:
+    """Vilka befintliga rader som ökades i stället för att få en dubblett."""
+    if not added["merged"]:
+        return ""
+    parts = [f"{m['after']} (oförändrad mängd)" if m["before"] == m["after"]
+             else f"{m['before']} → {m['after']}" for m in added["merged"]]
+    return "\nFanns redan på listan (ingen ny rad): " + "; ".join(parts) + "."
+
+
+def _only_new(res: dict, added: dict) -> dict:
+    """Rapportera bara okopplade varor som blev egna rader — en vara som gick
+    in i en befintlig rad har den radens avdelning."""
+    created = {it["name"] for it in added["created"] if not it.get("product")}
+    return {**res, "unlinked": [u for u in res["unlinked"] if u["name"] in created]}
 
 
 def _link_note(res: dict) -> str:
@@ -179,8 +195,9 @@ def add_items(items: list[Item], list_name: str | None = None) -> str:
     Varor kopplas till ICA:s produktregister vid exakt namnträff ('mjölk',
     'krossade tomater') och sorteras då i rätt avdelning. Övriga läggs till som
     fritext i angiven category, annars under Ospecificerad — de listas i svaret
-    med förslag och kan sorteras med link_item. Utelämna list_name för den
-    primära listan."""
+    med förslag och kan sorteras med link_item. En vara som redan finns på
+    listan (ej avbockad) får sin mängd ökad i stället för en ny rad.
+    Utelämna list_name för den primära listan."""
     parsed = [to_item(i.model_dump()) for i in items]
     parsed = [i for i in parsed if i["name"]]
     if not parsed:
@@ -188,9 +205,10 @@ def add_items(items: list[Item], list_name: str | None = None) -> str:
     c = client()
     L = c.resolve_list(list_name)
     res = c.link_products(parsed)
-    c.add_rows(L["offlineId"], parsed)
-    return (f"La till {len(parsed)} vara/varor på '{L.get('title')}': "
-            f"{', '.join(map(format_item, parsed))}{_link_note(res)}")
+    added = c.add_or_merge(L["offlineId"], parsed)
+    new = ", ".join(map(format_item, added["created"]))
+    head = f"La till på '{L.get('title')}': {new}." if new else f"Inga nya rader på '{L.get('title')}'."
+    return head + _merge_note(added) + _link_note(_only_new(res, added))
 
 
 @mcp.tool(annotations=WRITE)
@@ -375,9 +393,10 @@ def add_recipe_to_shopping_list(recipe_id: int, list_name: str | None = None) ->
         return f"Receptet '{recipe.get('title')}' saknar ingredienser."
     L = c.resolve_list(list_name)
     res = c.link_products(items, suggestions=0)
-    c.add_rows(L["offlineId"], items)
-    return (f"La till {len(items)} ingredienser från '{recipe.get('title')}' "
-            f"på '{L.get('title')}'.{_recipe_link_note(res, items)}")
+    added = c.add_or_merge(L["offlineId"], items)
+    return (f"La till {len(items)} ingredienser från '{recipe.get('title')}' på "
+            f"'{L.get('title')}' ({len(added['created'])} nya rader)."
+            f"{_merge_note(added)}{_recipe_link_note(_only_new(res, added), items)}")
 
 
 # ------------------------------------------------------ erbjudanden / butiker
@@ -469,7 +488,9 @@ def add_product_to_shopping_list(ean: str, list_name: str | None = None) -> str:
     # registrets generiska produkt (articleId, t.ex. 'mellanmjölk')
     item = to_item({"name": p["name"], "product_id": p.get("articleId")})
     res = c.link_products([item], suggestions=0)
-    c.add_rows(L["offlineId"], [item])
+    added = c.add_or_merge(L["offlineId"], [item])
+    if added["merged"]:
+        return f"'{p['name']}' på '{L.get('title')}':{_merge_note(added)}"
     linked = " (kopplad till ICA-produkt)" if res["linked"] else ""
     return f"La till '{p['name']}'{linked} på '{L.get('title')}'."
 
@@ -523,10 +544,11 @@ def add_recipes_to_shopping_list(recipe_ids: list[int],
     items = IcaClient.aggregate_ingredients(recipes)
     L = c.resolve_list(list_name)
     res = c.link_products(items, suggestions=0)
-    c.add_rows(L["offlineId"], items)
+    added = c.add_or_merge(L["offlineId"], items)
     titles = ", ".join(r.get("title") or "?" for r in recipes)
     return (f"La till {len(items)} ihopslagna ingredienser från {len(recipes)} "
-            f"recept ({titles}) på '{L.get('title')}'.{_recipe_link_note(res, items)}")
+            f"recept ({titles}) på '{L.get('title')}' ({len(added['created'])} nya rader)."
+            f"{_merge_note(added)}{_recipe_link_note(_only_new(res, added), items)}")
 
 
 @mcp.tool(annotations=WRITE)
@@ -544,12 +566,14 @@ def plan_dinners(count: int = 5, list_name: str | None = None,
     items = IcaClient.aggregate_ingredients(recipes)
     L = c.resolve_or_create_list(list_name or "Veckans middagar", store_name)
     res = c.link_products(items, suggestions=0)
-    c.add_rows(L["offlineId"], items)
+    added = c.add_or_merge(L["offlineId"], items)
     return {
         "list": L.get("title"),
         "dinners": [{"id": r.get("id"), "title": r.get("title"),
                      "cookingTime": r.get("cookingTime")} for r in recipes],
         "ingredients_added": len(items),
+        "new_rows": len(added["created"]),
+        "merged_into_existing_rows": [m["after"] for m in added["merged"]],
         "linked_to_ica_products": res["linked"],
     }
 

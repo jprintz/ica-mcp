@@ -24,7 +24,7 @@ BankID required for accounts that support password login).
 |---|---|
 | `list_shopping_lists` | All your lists + how many items remain/checked |
 | `view_shopping_list` | Contents of a list (by name; defaults to your primary list) |
-| `add_items` | Add one or more items to a list, each with a name and an optional quantity and unit (`st`, `förp`, `kg`, `hg`, `g`, `l`, `dl`, `cl`, `ml`, `msk`, `tsk`, `krm`) |
+| `add_items` | Add one or more items to a list, each with a name and an optional quantity and unit (`st`, `förp`, `kg`, `hg`, `g`, `l`, `dl`, `cl`, `ml`, `msk`, `tsk`, `krm`). An item that's already on the list gets its amount increased instead of a second row |
 | `check_off` / `uncheck` | Mark an item bought / undo |
 | `remove_item` | Remove an item entirely |
 | `clear_checked` | Remove all checked items (tidy up after shopping) |
@@ -70,6 +70,23 @@ server therefore links items, without guessing:
 - Barcode lookups are linked via the product's own `articleId`.
 - `view_shopping_list` shows each item's section, so unsorted items are easy
   to spot.
+
+### One row per item
+
+Adding something that's already on the list (and not checked off) increases
+that row instead of creating a duplicate, like the ICA app does when you add
+an item by hand. This applies to `add_items`, the recipe tools, `plan_dinners`
+and barcodes:
+
+- The same item means the same catalogue product, or the same name when
+  either side isn't linked.
+- Amounts are converted within volume (`krm`, `tsk`, `msk`, `ml`, `cl`, `dl`,
+  `l`) and weight (`g`, `hg`, `kg`), and the sum is shown in the larger unit:
+  2 msk + 1 dl olja = 1.3 dl. Units that don't convert (`st` and `g`) stay on
+  separate rows.
+- Recipe shares are added to the row's *Tillagd från recept*, so the app still
+  shows how much each recipe needs.
+- The reply lists which rows were increased.
 
 The catalogue (~3 MB) is fetched on first use and cached in memory and on disk
 for 24 hours (`ica-mcp` in the per-user cache dir; set `ICA_CACHE_DIR` to move
