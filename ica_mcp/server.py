@@ -5,10 +5,12 @@ ICA MCP-server (stdio) — låter agenter läsa och redigera dina ICA-inköpslis
 Verktyg:
   list_shopping_lists   – alla dina listor + hur många varor kvar/avbockade
   view_shopping_list    – innehållet i en lista
-  add_items             – lägg till varor (fri text) på en lista
+  add_items             – lägg till varor (namn, mängd, enhet); befintliga varor ökas
+  link_item             – sortera en vara (ICA-produkt eller avdelning)
   check_off / uncheck   – bocka av / ångra en vara
   remove_item           – ta bort en vara helt
-  create_shopping_list  – skapa ny lista
+  create_shopping_list  – skapa ny lista (kopplad till en butik)
+  set_list_store        – koppla en befintlig lista till en butik
   delete_shopping_list  – radera en lista
   clear_checked         – ta bort alla avbockade varor
   list_saved_recipes    – dina favoritrecept
@@ -19,6 +21,7 @@ Verktyg:
   get_offers            – aktuella erbjudanden för en butik
   get_bonus             – din ICA-bonus/Stammis
   get_product           – slå upp produkt via streckkod (EAN)
+  search_products       – sök i ICA:s produktregister (för product_id)
   add_product_to_shopping_list – streckkod → lägg produktens namn på en lista
   offers_on_my_list     – vilka varor på listan är på extrapris
   add_recipes_to_shopping_list – flera recept → ihopslagna ingredienser på en lista
@@ -38,15 +41,21 @@ import re
 import sys
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field
 
-from .client import IcaClient, IcaError
+from .client import (IcaClient, IcaError, Unit, apply_product, format_item, recipe_id_of,
+                     to_item, validate_barcode)
+from .products import ARTICLE_GROUPS, CATEGORY_IDS, UNSPECIFIED, Category, ProductCatalog
 
-# Logga till stderr (stdout är reserverat för MCP-protokollet!)
-logging.basicConfig(level=logging.INFO, stream=sys.stderr,
-                    format="%(levelname)s %(name)s: %(message)s")
 _LOG = logging.getLogger("ica_mcp")
 
 mcp = FastMCP("ICA")
+
+# MCP-etiketter så klienter vet vad verktygen gör
+READ = ToolAnnotations(readOnlyHint=True)
+WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
+DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
 _client: IcaClient | None = None
 
 
@@ -64,7 +73,65 @@ def _row_view(row: dict) -> dict:
         v["quantity"] = row["quantity"]
     if row.get("unit"):
         v["unit"] = row["unit"]
+    if (row.get("sourceId") or 0) > 0:  # kopplad till en ICA-produkt (negativ = fritext)
+        v["product_id"] = row["sourceId"]
+    v["category"] = ARTICLE_GROUPS.get(row.get("articleGroupId") or UNSPECIFIED, "Ospecificerad")
     return v
+
+
+_SORT_HINT = ("Sortera dem med link_item: product_id från förslagen (eller "
+              "search_products), eller en category (avdelning).")
+
+
+def _merge_note(added: dict) -> str:
+    """Vilka befintliga rader som ökades i stället för att få en dubblett."""
+    if not added["merged"]:
+        return ""
+    parts = [f"{m['after']} (oförändrad mängd)" if m["before"] == m["after"]
+             else f"{m['before']} → {m['after']}" for m in added["merged"]]
+    return "\nFanns redan på listan (ingen ny rad): " + "; ".join(parts) + "."
+
+
+def _only_new(res: dict, added: dict) -> dict:
+    """Rapportera okopplade varor som blev egna rader, eller som gick in i en
+    befintlig rad som fortfarande saknar avdelning — en vara som gick in i en
+    sorterad rad har den radens avdelning."""
+    keep = {it["name"] for it in added["created"] if not it.get("product")}
+    keep |= {n for m in added["merged"] if m.get("unsorted") for n in m.get("items", [])}
+    return {**res, "unlinked": [u for u in res["unlinked"] if u["name"] in keep]}
+
+
+def _linked_as(entries: list[dict]) -> str:
+    """'diskmedel → smör (Mejeri), …' för kopplingar som namnet inte styrker."""
+    return ", ".join(f"{e['name']} → {e['product']['name']} "
+                     f"({ARTICLE_GROUPS.get(e['product'].get('parentId'), 'okänd avdelning')})"
+                     for e in entries)
+
+
+def _link_note(res: dict) -> str:
+    """Rapport till LLM:en om varor som inte kopplades till en ICA-produkt.
+    Utan category hamnar de under Ospecificerad i appen. Kopplingar via
+    product_id redovisas också, så att ett felaktigt id syns."""
+    if not res["available"]:
+        return ("\nProduktregistret kunde inte hämtas just nu, så varorna lades till "
+                "som fritext; de utan category hamnar under Ospecificerad.")
+    unsorted = [u for u in res["unlinked"] if not u.get("category")]
+    sorted_ = [u for u in res["unlinked"] if u.get("category")]
+    note = ""
+    if res.get("explicit"):
+        note += "\nKopplade via product_id: " + _linked_as(res["explicit"]) + "."
+    if sorted_:
+        note += ("\nFritext i vald avdelning: "
+                 + ", ".join(f"{u['name']} ({u['category']})" for u in sorted_) + ".")
+    if unsorted:
+        parts = []
+        for u in unsorted:
+            why = f" ({u['reason']})" if u.get("reason") else ""
+            sugg = ", ".join(f"{s['name']} [{s['product_id']}]" for s in u["suggestions"])
+            parts.append(f"{u['name']}{why}" + (f" — förslag: {sugg}" if sugg else " — inga förslag"))
+        note += ("\nHamnar under Ospecificerad (ingen ICA-produkt matchade): "
+                 + "; ".join(parts) + ". " + _SORT_HINT)
+    return note
 
 
 def _resolve_rows(list_obj: dict, item: str, unstruck_only: bool = False) -> list[dict]:
@@ -81,8 +148,26 @@ def _resolve_rows(list_obj: dict, item: str, unstruck_only: bool = False) -> lis
     return matches
 
 
+class Item(BaseModel):
+    """En vara med valfri mängd och enhet."""
+    name: str = Field(description="Varans namn utan mängd, t.ex. 'grädde'")
+    quantity: float | None = Field(None, gt=0, le=10_000, allow_inf_nan=False,
+                                   description="Mängd större än 0, t.ex. 2 eller 1.5")
+    unit: Unit | None = Field(
+        None, description="Enhet. Använd st för styck/burk/påse/flaska o.d.; "
+                          "mängd utan enhet blir st.")
+    product_id: int | None = Field(
+        None, description="ICA-produktens id (från search_products) om varan ska "
+                          "kopplas till en viss produkt. Utelämna normalt: varan "
+                          "kopplas automatiskt vid exakt namnträff.")
+    category: Category | None = Field(
+        None, description="Avdelning i butiken. Används om varan inte matchar en "
+                          "ICA-produkt; utan den hamnar varan under Ospecificerad. "
+                          "Ange gärna för varor som inte är vanliga livsmedel.")
+
+
 # -------------------------------------------------------------------- tools
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def list_shopping_lists() -> list[dict]:
     """Lista alla dina ICA-inköpslistor med antal varor kvar och avbockade.
     Den första listan är din primära ('Handla') och används som standard när
@@ -100,7 +185,7 @@ def list_shopping_lists() -> list[dict]:
     return out
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def view_shopping_list(list_name: str | None = None) -> dict:
     """Visa innehållet i en inköpslista. list_name matchas mot listans titel
     (utelämna för den primära listan). Returnerar varor uppdelat i kvar/avbockade."""
@@ -113,18 +198,62 @@ def view_shopping_list(list_name: str | None = None) -> dict:
             "summary": f"{len(remaining)} kvar, {len(checked)} avbockade"}
 
 
-@mcp.tool()
-def add_items(items: list[str], list_name: str | None = None) -> str:
-    """Lägg till en eller flera varor (fri text, t.ex. 'mjölk', '2 kg potatis')
-    på en inköpslista. Utelämna list_name för den primära listan."""
-    if not items:
+@mcp.tool(annotations=WRITE)
+def add_items(items: list[Item], list_name: str | None = None, merge: bool = True) -> str:
+    """Lägg till en eller flera varor på en inköpslista, var och en som
+    {name, quantity?, unit?}, t.ex. {name: 'grädde', quantity: 2, unit: 'dl'}
+    eller bara {name: 'mjölk'}. Lägg mängd och enhet i sina fält, inte i namnet.
+    Varor kopplas till ICA:s produktregister vid exakt namnträff ('mjölk',
+    'krossade tomater') och sorteras då i rätt avdelning. Övriga läggs till som
+    fritext i angiven category, annars under Ospecificerad — de listas i svaret
+    med förslag och kan sorteras med link_item. En produktträff (på namn eller
+    product_id) går före category. En vara som redan finns på listan (ej
+    avbockad) får sin mängd ökad i stället för en ny rad; merge=False ger
+    alltid nya rader. Utelämna list_name för den primära listan."""
+    parsed = [to_item(i.model_dump()) for i in items]
+    parsed = [i for i in parsed if i["name"]]
+    if not parsed:
         return "Inga varor angivna."
-    L = client().resolve_list(list_name)
-    client().add_rows(L["offlineId"], list(items))
-    return f"La till {len(items)} vara/varor på '{L.get('title')}': {', '.join(items)}"
+    c = client()
+    L = c.resolve_list(list_name)
+    res = c.link_products(parsed)
+    added = c.add_or_merge(L["offlineId"], parsed, merge=merge)
+    new = ", ".join(map(format_item, added["created"]))
+    head = f"La till på '{L.get('title')}': {new}." if new else f"Inga nya rader på '{L.get('title')}'."
+    return head + _merge_note(added) + _link_note(_only_new(res, added))
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
+def link_item(item: str, product_id: int | None = None, category: Category | None = None,
+              list_name: str | None = None) -> str:
+    """Sortera en vara som redan finns på listan, t.ex. en under Ospecificerad:
+    koppla den till en ICA-produkt (product_id, från förslagen i add_items eller
+    search_products) eller ge den en avdelning (category). Ange det ena. Namn
+    och mängd ändras inte. Utelämna list_name för den primära listan."""
+    if (product_id is None) == (category is None):
+        return "Ange antingen product_id eller category."
+    c = client()
+    L = c.resolve_list(list_name)
+    fresh = c.get_list_raw(L["offlineId"])
+    rows = _resolve_rows(fresh, item)
+    if product_id is not None:
+        catalog = c.product_catalog()
+        p = catalog.get(product_id) if catalog else None
+        if not p:
+            raise IcaError(f"Okänd produkt {product_id} (eller produktregistret kunde "
+                           "inte hämtas). Sök med search_products.")
+        for r in rows:
+            apply_product(r, p)
+        where = f"ICA-produkten {p['name']} ({ARTICLE_GROUPS.get(p['parentId'], 'okänd avdelning')})"
+    else:
+        for r in rows:
+            r["articleGroupId"] = r["articleGroupIdExtended"] = CATEGORY_IDS[category]
+        where = f"avdelningen {category}"
+    c.change_rows(L["offlineId"], rows)
+    return f"'{rows[0].get('productName')}' på '{fresh.get('title')}' är nu kopplad till {where}."
+
+
+@mcp.tool(annotations=WRITE)
 def check_off(item: str, list_name: str | None = None) -> str:
     """Bocka av en vara (markera som köpt/klar) på en lista."""
     c = client()
@@ -137,7 +266,7 @@ def check_off(item: str, list_name: str | None = None) -> str:
     return f"Bockade av '{rows[0].get('productName')}' på '{fresh.get('title')}'."
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 def uncheck(item: str, list_name: str | None = None) -> str:
     """Ångra avbockning av en vara (markera som ej köpt igen)."""
     c = client()
@@ -150,22 +279,31 @@ def uncheck(item: str, list_name: str | None = None) -> str:
     return f"Ångrade avbockning av '{rows[0].get('productName')}' på '{fresh.get('title')}'."
 
 
-@mcp.tool()
+def _resolve_destructive(c, list_name: str | None) -> dict:
+    """Utelämnat namn = primärlistan; angivet namn måste matcha exakt (ingen delmatchning)."""
+    if list_name is None or not str(list_name).strip():
+        return c.resolve_list(None)
+    return c.resolve_list(list_name, exact=True)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
 def remove_item(item: str, list_name: str | None = None) -> str:
-    """Ta bort en vara helt från en lista (inte samma som att bocka av)."""
+    """Ta bort en vara helt från en lista (inte samma som att bocka av).
+    list_name måste vara listans exakta namn; utelämnat = primärlistan."""
     c = client()
-    L = c.resolve_list(list_name)
+    L = _resolve_destructive(c, list_name)
     fresh = c.get_list_raw(L["offlineId"])
     rows = _resolve_rows(fresh, item)
     c.delete_rows(L["offlineId"], [r["offlineId"] for r in rows])
     return f"Tog bort '{rows[0].get('productName')}' från '{fresh.get('title')}'."
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 def clear_checked(list_name: str | None = None) -> str:
-    """Ta bort alla avbockade varor från en lista (rensa upp efter handling)."""
+    """Ta bort alla avbockade varor från en lista (rensa upp efter handling).
+    list_name måste vara listans exakta namn; utelämnat = primärlistan."""
     c = client()
-    L = c.resolve_list(list_name)
+    L = _resolve_destructive(c, list_name)
     fresh = c.get_list_raw(L["offlineId"])
     struck = [r["offlineId"] for r in fresh.get("rows", []) if r.get("isStrikedOver")]
     if not struck:
@@ -174,24 +312,58 @@ def clear_checked(list_name: str | None = None) -> str:
     return f"Rensade {len(struck)} avbockade varor från '{fresh.get('title')}'."
 
 
-@mcp.tool()
-def create_shopping_list(title: str) -> str:
-    """Skapa en ny inköpslista med angiven titel."""
-    L = client().create_list(title)
-    return f"Skapade listan '{L.get('title')}'."
+def _store_note(L: dict) -> str:
+    sid = L.get("sortingStore")
+    return (f" (butik {sid})" if sid else
+            " (utan butik: lägg till en favoritbutik i ICA-appen för att få kategorier)")
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
+def create_shopping_list(title: str, store_name: str | None = None) -> str:
+    """Skapa en ny inköpslista med angiven titel, kopplad till en butik (krävs
+    för att ICA-appen ska visa kategorier). store_name matchas mot dina
+    favoritbutiker; utelämna för din primära butik."""
+    c = client()
+    L = c.create_list(title, store_id=c.store_id_for(store_name))
+    return f"Skapade listan '{L.get('title')}'{_store_note(L)}."
+
+
+@mcp.tool(annotations=WRITE)
+def set_list_store(list_name: str | None = None, store_name: str | None = None) -> str:
+    """Koppla en befintlig inköpslista till en butik, så att ICA-appen visar
+    kategorier och sorterar efter butiken. store_name matchas mot dina
+    favoritbutiker (utelämna för din primära butik); utelämna list_name för
+    den primära listan. Varorna på listan påverkas inte."""
+    c = client()
+    L = c.resolve_list(list_name)
+    store = c.resolve_store(store_name)
+    new = store.get("name") or store["id"]
+    old_id = L.get("sortingStore") or 0
+    if int(old_id) == int(store["id"]):
+        return f"Listan '{L.get('title')}' är redan kopplad till {new}."
+    c.set_list_store(L["offlineId"], store["id"])
+    if not old_id:
+        was = "utan butik"
+    else:
+        try:
+            was = c.get_store(old_id).get("marketingName") or f"butik {old_id}"
+        except IcaError:
+            was = f"butik {old_id}"
+    return f"Listan '{L.get('title')}' är nu kopplad till {new} (var: {was})."
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
 def delete_shopping_list(list_name: str) -> str:
-    """Radera en hel inköpslista (kräver att du anger listnamnet explicit)."""
-    L = client().resolve_list(list_name)
+    """Radera en hel inköpslista. Kräver listans EXAKTA namn (eller id); tomt
+    namn, primärlistan som standard och delmatchning tillåts inte."""
+    L = client().resolve_list(list_name, exact=True)
     title = L.get("title")
     client().delete_list(L["offlineId"])
     return f"Raderade listan '{title}'."
 
 
 # ------------------------------------------------------------------ recept
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def list_saved_recipes(limit: int = 12) -> dict:
     """Lista dina favoritmarkerade recept (senast tillagda först). Hämtar
     detaljer per recept, så håll limit lågt (standard 12)."""
@@ -208,7 +380,7 @@ def list_saved_recipes(limit: int = 12) -> dict:
     return {"total_saved": len(refs), "showing": len(recipes), "recipes": recipes}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def get_recipe(recipe_id: int) -> dict:
     """Hämta ett recept: titel, tid, portioner, ingredienser (fri text) och
     tillagningssteg."""
@@ -219,37 +391,58 @@ def get_recipe(recipe_id: int) -> dict:
     return s
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def random_recipes(count: int = 3) -> list[dict]:
     """Hämta slumpmässiga recept för inspiration (count 1–10)."""
     count = max(1, min(int(count), 10))
     return [IcaClient.recipe_summary(r) for r in client().get_random_recipes(count)]
 
 
-@mcp.tool()
+def _recipe_link_note(res: dict, items: list[dict]) -> str:
+    """Kort rapport för recept: ingredienser kopplas på namn, annars på
+    receptets ingrediens-id; övriga hamnar under Ospecificerad."""
+    if not res["available"]:
+        return (" Produktregistret kunde inte hämtas, så ingredienserna lades till "
+                "som fritext under Ospecificerad.")
+    note = f" {res['linked']} av {len(items)} kopplade till ICA-produkter."
+    if res.get("fallback"):
+        note += (" Kopplade bara via receptets ingrediens-id (kan vara för grovt, rätta "
+                 "med link_item): " + _linked_as(res["fallback"]) + ".")
+    if res["unlinked"]:
+        note += (" Under Ospecificerad: " + ", ".join(u["name"] for u in res["unlinked"])
+                 + ". " + _SORT_HINT)
+    return note
+
+
+@mcp.tool(annotations=WRITE)
 def add_recipe_to_shopping_list(recipe_id: int, list_name: str | None = None) -> str:
-    """Lägg alla ingredienser från ett recept som varor på en inköpslista
-    (fri text, t.ex. '8 dl mjölk'). Utelämna list_name för primärlistan."""
+    """Lägg alla ingredienser från ett recept som varor på en inköpslista, med
+    mängd och enhet (t.ex. 8 dl mjölk). I appen visas receptet under "Tillagd
+    från recept" på varje vara. Utelämna list_name för primärlistan."""
     c = client()
     recipe = c.get_recipe(recipe_id)
-    items = IcaClient.recipe_ingredient_texts(recipe)
+    if recipe_id_of(recipe) is None:  # saknas/oläsbart id → det vi bad om
+        recipe = {**recipe, "id": recipe_id}
+    items = IcaClient.aggregate_ingredients([recipe])
     if not items:
         return f"Receptet '{recipe.get('title')}' saknar ingredienser."
     L = c.resolve_list(list_name)
-    c.add_rows(L["offlineId"], items)
-    return (f"La till {len(items)} ingredienser från '{recipe.get('title')}' "
-            f"på '{L.get('title')}'.")
+    res = c.link_products(items, suggestions=0)
+    added = c.add_or_merge(L["offlineId"], items)
+    return (f"La till {len(items)} ingredienser från '{recipe.get('title')}' på "
+            f"'{L.get('title')}' ({len(added['created'])} nya rader)."
+            f"{_merge_note(added)}{_recipe_link_note(_only_new(res, added), items)}")
 
 
 # ------------------------------------------------------ erbjudanden / butiker
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def list_stores() -> list[dict]:
     """Lista dina favoritbutiker (id, namn, ort). Den första är standardbutik
     för erbjudanden."""
     return client().get_favorite_stores()
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def get_offers(store_name: str | None = None, query: str | None = None,
                limit: int = 40) -> dict:
     """Hämta aktuella erbjudanden för en butik. store_name matchas mot dina
@@ -268,7 +461,7 @@ def get_offers(store_name: str | None = None, query: str | None = None,
             "offers": offers[:max(1, int(limit))]}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def get_bonus() -> dict:
     """Visa din ICA-bonus/Stammis: kupongvärde, aktiva kuponger och rabatt hittills."""
     b = client().get_bonus()
@@ -285,32 +478,64 @@ def get_bonus() -> dict:
 
 
 # ------------------------------------------------------------------ produkt
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def get_product(ean: str) -> dict:
     """Slå upp en produkt via streckkod (EAN/GTIN). Returnerar namn +
     artikelgrupp, eller found=False om koden inte finns."""
-    p = client().get_product(str(ean).strip())
+    try:
+        validate_barcode(ean)
+    except IcaError as e:  # bara ogiltig kod — API-fel ska synas som fel
+        return {"found": False, "ean": ean, "message": str(e)}
+    p = client().get_product(ean)
     if not p:
         return {"found": False, "ean": ean, "message": f"Ingen produkt för EAN {ean}."}
     return {"found": True, "ean": p.get("gtin"), "name": p.get("name"),
             "articleId": p.get("articleId"), "articleGroupId": p.get("articleGroupId")}
 
 
-@mcp.tool()
-def add_product_to_shopping_list(ean: str, list_name: str | None = None) -> str:
+@mcp.tool(annotations=READ)
+def search_products(query: str, limit: int = 10) -> list[dict]:
+    """Sök i ICA:s produktregister (generiska varor som 'mjölk', 'krossad
+    tomat'). Använd för att hitta product_id när add_items inte kunde koppla en
+    vara, eller för att välja rätt bland liknande. Returnerar product_id, namn,
+    pluralnamn och kategori, bäst träff först (limit 1–25)."""
+    catalog = client().product_catalog()
+    if catalog is None:
+        raise IcaError("Produktregistret kunde inte hämtas just nu. Försök igen senare.")
+    return [ProductCatalog.summary(a)
+            for a in catalog.search(query, max(1, min(int(limit), 25)))]
+
+
+@mcp.tool(annotations=WRITE)
+def add_product_to_shopping_list(ean: str, list_name: str | None = None,
+                                 merge: bool = True) -> str:
     """Slå upp en streckkod (EAN/GTIN) och lägg produktens namn på en lista.
-    Utelämna list_name för primärlistan."""
+    Finns varan redan (ej avbockad) läggs ingen ny rad till; merge=False ger
+    alltid en ny rad. Utelämna list_name för primärlistan."""
+    try:
+        validate_barcode(ean)
+    except IcaError as e:  # bara ogiltig kod — API-fel ska synas som fel
+        return str(e)
     c = client()
-    p = c.get_product(str(ean).strip())
+    p = c.get_product(ean)
     if not p:
         return f"Ingen produkt hittades för EAN {ean}."
     L = c.resolve_list(list_name)
-    c.add_rows(L["offlineId"], [p["name"]])
-    return f"La till '{p['name']}' på '{L.get('title')}'."
+    # behåll produktens namn ('Färsk mellanmjölk Arla Ko®') men koppla till
+    # registrets generiska produkt (articleId, t.ex. 'mellanmjölk')
+    # avdelningen från streckkodsuppslaget gäller om produkten inte hittas i registret
+    item = to_item({"name": p["name"], "product_id": p.get("articleId"),
+                    "category": ARTICLE_GROUPS.get(p.get("articleGroupId"))})
+    res = c.link_products([item], suggestions=0)
+    added = c.add_or_merge(L["offlineId"], [item], merge=merge)
+    if added["merged"]:
+        return f"'{p['name']}' på '{L.get('title')}':{_merge_note(added)}"
+    linked = " (kopplad till ICA-produkt)" if res["linked"] else ""
+    return f"La till '{p['name']}'{linked} på '{L.get('title')}'."
 
 
 # --------------------------------------------------------- smarta flöden
-@mcp.tool()
+@mcp.tool(annotations=READ)
 def offers_on_my_list(list_name: str | None = None,
                       store_name: str | None = None) -> dict:
     """Korsa din inköpslista mot en butiks aktuella erbjudanden — visar vilka
@@ -340,11 +565,12 @@ def offers_on_my_list(list_name: str | None = None,
             "summary": f"{len(on_sale)} vara/varor på listan har erbjudanden på {store.get('name')}"}
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 def add_recipes_to_shopping_list(recipe_ids: list[int],
                                  list_name: str | None = None) -> str:
     """Lägg ingredienserna från FLERA recept på en lista, ihopslagna (samma
-    vara + enhet summeras). Utelämna list_name för primärlistan."""
+    vara + enhet summeras). Varje recepts andel visas under "Tillagd från
+    recept" i appen. Utelämna list_name för primärlistan."""
     c = client()
     recipes = []
     for rid in recipe_ids:
@@ -356,35 +582,60 @@ def add_recipes_to_shopping_list(recipe_ids: list[int],
         return "Kunde inte hämta något av recepten."
     items = IcaClient.aggregate_ingredients(recipes)
     L = c.resolve_list(list_name)
-    c.add_rows(L["offlineId"], items)
+    res = c.link_products(items, suggestions=0)
+    added = c.add_or_merge(L["offlineId"], items)
     titles = ", ".join(r.get("title") or "?" for r in recipes)
     return (f"La till {len(items)} ihopslagna ingredienser från {len(recipes)} "
-            f"recept ({titles}) på '{L.get('title')}'.")
+            f"recept ({titles}) på '{L.get('title')}' ({len(added['created'])} nya rader)."
+            f"{_merge_note(added)}{_recipe_link_note(_only_new(res, added), items)}")
 
 
-@mcp.tool()
-def plan_dinners(count: int = 5, list_name: str | None = None) -> dict:
+@mcp.tool(annotations=WRITE)
+def plan_dinners(count: int = 5, list_name: str | None = None,
+                 store_name: str | None = None) -> dict:
     """Planera veckans middagar: hämtar `count` slumprecept (1–10), slår ihop
     deras ingredienser och lägger på en lista (skapar 'Veckans middagar' om
-    list_name utelämnas). Returnerar menyn."""
+    list_name utelämnas). En ny lista kopplas till store_name (favoritbutik)
+    eller din primära butik. Returnerar menyn."""
     count = max(1, min(int(count), 10))
     c = client()
     recipes = c.get_random_recipes(count)
     if not recipes:
         return {"error": "Kunde inte hämta recept."}
     items = IcaClient.aggregate_ingredients(recipes)
-    L = c.resolve_or_create_list(list_name or "Veckans middagar")
-    c.add_rows(L["offlineId"], items)
-    return {
+    name = list_name or "Veckans middagar"
+    # store_name gäller bara en ny lista — säg till om den inte användes
+    existed = bool(store_name) and any(
+        L.get("title", "").lower() == name.strip().lower() for L in c.get_lists())
+    L = c.resolve_or_create_list(name, store_name)
+    res = c.link_products(items, suggestions=0)
+    added = c.add_or_merge(L["offlineId"], items)
+    out = {
         "list": L.get("title"),
         "dinners": [{"id": r.get("id"), "title": r.get("title"),
                      "cookingTime": r.get("cookingTime")} for r in recipes],
         "ingredients_added": len(items),
+        "new_rows": len(added["created"]),
+        "merged_into_existing_rows": [m["after"] for m in added["merged"]],
+        "linked_to_ica_products": res["linked"],
     }
+    if existed:
+        out["note"] = (f"Listan '{L.get('title')}' fanns redan, så store_name användes "
+                       "inte — listans butik är oförändrad. Byt med set_list_store.")
+    return out
+
+
+def _configure_logging() -> None:
+    """Logga till stderr (stdout är reserverat för MCP-protokollet!). force=True
+    eftersom FastMCP() redan har kört basicConfig vid import med sitt eget
+    format — utan force blir anropet en no-op och nivå/namn försvinner."""
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, force=True,
+                        format="%(levelname)s %(name)s: %(message)s")
 
 
 def serve() -> None:
     """Starta MCP-servern (stdio). Anropas av `ica-mcp serve`."""
+    _configure_logging()
     mcp.run()
 
 

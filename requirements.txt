@@ -5,5 +5,5 @@
 # Den här filen finns kvar för plain-pip-fallback och speglar pyproject.
 requests>=2.31
 PyJWT>=2.8
-mcp>=1.2
+mcp>=1.14,<2
 platformdirs>=4.0

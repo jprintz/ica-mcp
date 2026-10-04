@@ -24,25 +24,78 @@ BankID required for accounts that support password login).
 |---|---|
 | `list_shopping_lists` | All your lists + how many items remain/checked |
 | `view_shopping_list` | Contents of a list (by name; defaults to your primary list) |
-| `add_items` | Add one or more free-text items to a list |
+| `add_items` | Add one or more items to a list, each with a name and an optional quantity and unit (`st`, `förp`, `kg`, `hg`, `g`, `l`, `dl`, `cl`, `ml`, `msk`, `tsk`, `krm`). An item that's already on the list gets its amount increased instead of a second row |
 | `check_off` / `uncheck` | Mark an item bought / undo |
 | `remove_item` | Remove an item entirely |
 | `clear_checked` | Remove all checked items (tidy up after shopping) |
-| `create_shopping_list` / `delete_shopping_list` | Create / delete a list |
+| `set_list_store` | Link an existing list to one of your favourite stores (for categories in the ICA app) |
+| `create_shopping_list` / `delete_shopping_list` | Create / delete a list. New lists are linked to your primary favourite store (or `store_name`); the ICA app only shows categories for lists with a store |
 | `list_saved_recipes` / `get_recipe` | Your favourite recipes; one recipe's ingredients + steps |
 | `random_recipes` | Random recipes for inspiration |
-| `add_recipe_to_shopping_list` | Add a recipe's ingredients to a list as free-text items |
+| `add_recipe_to_shopping_list` | Add a recipe's ingredients to a list, with their quantities and units. The app shows the recipe under *Tillagd från recept* on each item |
 | `list_stores` / `get_offers` | Your favourite stores; current offers for a store |
 | `get_bonus` | Your ICA bonus / Stammis balance |
 | `get_product` | Look up a product by barcode (EAN/GTIN) |
+| `search_products` | Search ICA's product catalogue, e.g. to find the `product_id` for an item that wasn't linked automatically |
+| `link_item` | Sort an item already on a list: link it to a catalogue product or give it a section (category) |
 | `add_product_to_shopping_list` | Look up a barcode and add the product's name to a list |
 | `offers_on_my_list` | Which items on your list are on sale at a store |
-| `add_recipes_to_shopping_list` | Merge several recipes' ingredients onto one list |
+| `add_recipes_to_shopping_list` | Merge several recipes' ingredients onto one list; each item shows how much each recipe needs |
 | `plan_dinners` | Random weekly menu → one aggregated shopping list |
 
 Lists, items and stores are referenced **by name**, so an agent can act on
 natural language. Omitting a list/store name targets your primary one (the
 `Handla` list / your first favourite store).
+
+### Product linking and categories
+
+The ICA app sorts a list by section (Mejeri, Frukt & Grönt …) when the list
+has a store. An item gets its section from the product it is linked to in
+ICA's catalogue (~6,900 generic products such as `mjölk` or `krossad tomat`).
+**Free text that doesn't match a product ends up under _Ospecificerad_.** The
+server therefore links items, without guessing:
+
+- `add_items` links an item when its name exactly matches a product name or
+  plural (case-insensitive; notes in brackets such as `(à ca 400 g)` are
+  ignored). Otherwise the item is added as free text, in its `category`
+  (section) if the agent gave one, and the reply lists the unsorted ones with
+  suggestions.
+- `link_item` sorts an item already on the list, by `product_id` (from the
+  suggestions or `search_products`) or by `category`.
+- Recipe ingredients keep their names and are linked by exact name first,
+  then by ICA's own recipe `ingredientId`. The id is only a fallback because
+  it is sometimes too coarse (`krossade tomater` → `tomat`, i.e. fresh
+  tomatoes); in a sample of 44 unmatched ingredients it gave the right section
+  for 41.
+- Barcode lookups are linked via the product's own `articleId`.
+- `view_shopping_list` shows each item's section, so unsorted items are easy
+  to spot.
+
+### One row per item
+
+Adding something that's already on the list (and not checked off) increases
+that row instead of creating a duplicate, like the ICA app does when you add
+an item by hand. This applies to `add_items`, the recipe tools, `plan_dinners`
+and barcodes:
+
+- The same item means the same name (ignoring case, spacing and Unicode form),
+  or two different names linked to the same catalogue product. Links that are
+  only approximate never merge different names: a recipe's coarse ingredient
+  id ("körsbärstomater på burk" → tomat), an amount kept in the name
+  ("vitlök (3 klyftor)"), or a row whose name doesn't match its product.
+- Amounts are converted within volume (`krm`, `tsk`, `msk`, `ml`, `cl`, `dl`,
+  `l`) and weight (`g`, `hg`, `kg`). The sum is shown in the larger unit when
+  it is exact there (2 msk + 1 dl olja = 1,3 dl), otherwise in the smaller one
+  (1 tsk + 1 msk = 4 tsk). Units that don't convert (`st` and `g`) stay on
+  separate rows.
+- Pass `merge=False` to `add_items` or the barcode tool to always add a new row.
+- Recipe shares are added to the row's *Tillagd från recept*, so the app still
+  shows how much each recipe needs.
+- The reply lists which rows were increased.
+
+The catalogue (~3 MB) is fetched on first use and cached in memory and on disk
+for 24 hours (`ica-mcp` in the per-user cache dir; set `ICA_CACHE_DIR` to move
+it). If it can't be fetched, items are added as free text.
 
 ## Requirements
 
@@ -174,6 +227,8 @@ public in that project), not user secrets.
   `chmod 0600` on POSIX. On **Windows** that only toggles the read-only bit, so
   the file is not OS-ACL-protected there — treat the machine account as the
   trust boundary. Set `ICA_STATE_FILE` to relocate the cache.
+- The product catalogue cache (see *Product linking and categories*) holds
+  only ICA's public product list, no personal data.
 - **No `keyring` dependency by design.** The Swedish-egress requirement pushes
   many users onto headless homelab/VPS boxes that lack a Secret Service /
   Credential Manager; a portable `0600` file is the deliberate choice.
