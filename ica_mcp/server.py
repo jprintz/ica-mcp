@@ -172,11 +172,19 @@ def uncheck(item: str, list_name: str | None = None) -> str:
     return f"Ångrade avbockning av '{rows[0].get('productName')}' på '{fresh.get('title')}'."
 
 
+def _resolve_destructive(c, list_name: str | None) -> dict:
+    """Utelämnat namn = primärlistan; angivet namn måste matcha exakt (ingen delmatchning)."""
+    if list_name is None or not str(list_name).strip():
+        return c.resolve_list(None)
+    return c.resolve_list(list_name, exact=True)
+
+
 @mcp.tool(annotations=DESTRUCTIVE)
 def remove_item(item: str, list_name: str | None = None) -> str:
-    """Ta bort en vara helt från en lista (inte samma som att bocka av)."""
+    """Ta bort en vara helt från en lista (inte samma som att bocka av).
+    list_name måste vara listans exakta namn; utelämnat = primärlistan."""
     c = client()
-    L = c.resolve_list(list_name)
+    L = _resolve_destructive(c, list_name)
     fresh = c.get_list_raw(L["offlineId"])
     rows = _resolve_rows(fresh, item)
     c.delete_rows(L["offlineId"], [r["offlineId"] for r in rows])
@@ -185,9 +193,10 @@ def remove_item(item: str, list_name: str | None = None) -> str:
 
 @mcp.tool(annotations=DESTRUCTIVE)
 def clear_checked(list_name: str | None = None) -> str:
-    """Ta bort alla avbockade varor från en lista (rensa upp efter handling)."""
+    """Ta bort alla avbockade varor från en lista (rensa upp efter handling).
+    list_name måste vara listans exakta namn; utelämnat = primärlistan."""
     c = client()
-    L = c.resolve_list(list_name)
+    L = _resolve_destructive(c, list_name)
     fresh = c.get_list_raw(L["offlineId"])
     struck = [r["offlineId"] for r in fresh.get("rows", []) if r.get("isStrikedOver")]
     if not struck:

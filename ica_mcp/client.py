@@ -523,12 +523,13 @@ class IcaClient:
             if not s:
                 raise IcaError("Ange listans exakta namn (tomt namn tillåts inte här).")
             low = s.lower()
+            # Samla träffar på id, offlineId OCH titel: om t.ex. en listas id
+            # råkar vara en annan listas titel ska vi vägra, inte gissa.
             hits = [L for L in lists if str(L.get("id")) == s
-                    or L.get("offlineId", "").lower() == low]
-            if not hits:
-                hits = [L for L in lists if L.get("title", "").strip().lower() == low]
+                    or L.get("offlineId", "").lower() == low
+                    or L.get("title", "").strip().lower() == low]
             if len(hits) > 1:
-                raise IcaError(f"Flera listor heter exakt {ref!r}: {[L['title'] for L in hits]}")
+                raise IcaError(f"Flera listor matchar exakt {ref!r}: {[L['title'] for L in hits]}")
             if hits:
                 return hits[0]
             raise IcaError(f"Ingen lista heter exakt {ref!r}. Dina listor: {[L['title'] for L in lists]}")
