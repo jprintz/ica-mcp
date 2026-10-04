@@ -380,11 +380,17 @@ def plan_dinners(count: int = 5, list_name: str | None = None) -> dict:
     }
 
 
+def _configure_logging() -> None:
+    """Logga till stderr (stdout är reserverat för MCP-protokollet!). force=True
+    eftersom FastMCP() redan har kört basicConfig vid import med sitt eget
+    format — utan force blir anropet en no-op och nivå/namn försvinner."""
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, force=True,
+                        format="%(levelname)s %(name)s: %(message)s")
+
+
 def serve() -> None:
     """Starta MCP-servern (stdio). Anropas av `ica-mcp serve`."""
-    # Logga till stderr (stdout är reserverat för MCP-protokollet!)
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
-                        format="%(levelname)s %(name)s: %(message)s")
+    _configure_logging()
     mcp.run()
 
 
