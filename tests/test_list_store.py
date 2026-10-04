@@ -62,3 +62,36 @@ def test_resolve_or_create_list_sets_store_only_when_creating():
     assert c.posted == []  # befintlig lista — ingen butik ändras
     L = _Fake().resolve_or_create_list("Veckans middagar", "nära")
     assert L["sortingStore"] == 1234
+
+
+# ------------------------------------------------------------ set_list_store
+class _SyncRecorder(_Fake):
+    def _sync(self, offline_id, payload):
+        self.posted.append(("SYNC", offline_id, payload))
+        return {}
+
+
+def test_set_list_store_sends_changed_properties():
+    c = _SyncRecorder()
+    c.set_list_store("LIST-1", 1234)
+    _, oid, payload = c.posted[0]
+    props = payload["changedShoppingListProperties"]
+    assert oid == "LIST-1" and props["sortingStore"] == 1234 and props["latestChange"]
+    assert set(payload) == {"changedShoppingListProperties"}  # inga rader rörs
+
+
+def test_set_list_store_tool(monkeypatch):
+    from ica_mcp import server
+    c = _SyncRecorder(lists=[{"title": "Handla", "offlineId": "H"}, {"title": "Fest", "offlineId": "F"}])
+    monkeypatch.setattr(server, "_client", c)
+    msg = server.set_list_store("fest", "nära")
+    assert c.posted[-1][1] == "F"
+    assert c.posted[-1][2]["changedShoppingListProperties"]["sortingStore"] == 1234
+    assert "ICA Nära Hemma" in msg
+
+
+def test_set_list_store_is_annotated_as_write():
+    import asyncio
+    from ica_mcp.server import mcp
+    tool = next(t for t in asyncio.run(mcp.list_tools()) if t.name == "set_list_store")
+    assert tool.annotations.readOnlyHint is False and tool.annotations.destructiveHint is False

@@ -504,6 +504,12 @@ class IcaClient:
     def delete_rows(self, offline_id: str, row_offline_ids: list[str]) -> dict:
         return self._sync(offline_id, {"deletedRows": list(row_offline_ids)})
 
+    def set_list_store(self, offline_id: str, store_id: int) -> dict:
+        """Byt butik (sortingStore) på en befintlig lista; varorna påverkas inte.
+        Verifierat mot ICA: /sync med changedShoppingListProperties."""
+        return self._sync(offline_id, {"changedShoppingListProperties": {
+            "sortingStore": int(store_id), "latestChange": _ts()}})
+
     # ---------------------------------------------------- resolvers
     def resolve_list(self, ref: str | int | None = None, exact: bool = False) -> dict:
         """Hitta en lista via titel, numeriskt id eller offlineId. None = primär.
