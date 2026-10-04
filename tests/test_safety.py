@@ -51,6 +51,14 @@ def test_exact_duplicate_titles_raise():
         c.resolve_list("Fest", exact=True)
 
 
+def test_exact_refuses_id_colliding_with_title():
+    # listan med id 4711 och listan som HETER "4711" är olika – gissa inte
+    c = make_client([{"id": 4711, "offlineId": "EEE-555", "title": "Handla"},
+                     {"id": 5, "offlineId": "FFF-666", "title": "4711"}])
+    with pytest.raises(IcaError, match="Flera"):
+        c.resolve_list("4711", exact=True)
+
+
 @pytest.mark.parametrize("raw,clean", [("7310865001962", "7310865001962"),
                                        (" 7310 8650 01962 ", "7310865001962"),
                                        ("12345678", "12345678"),
@@ -134,3 +142,30 @@ def test_tool_annotations():
             assert a.readOnlyHint is False and a.destructiveHint is True, name
         else:
             assert a.readOnlyHint is False and a.destructiveHint is False, name
+
+
+def _list_with_rows(offline_id="BBB-222", title="Fest"):
+    return {"offlineId": offline_id, "title": title, "rows": [
+        {"offlineId": "r1", "productName": "mjölk", "isStrikedOver": True}]}
+
+
+@pytest.mark.parametrize("tool,args", [("clear_checked", ()), ("remove_item", ("mjölk",))])
+def test_destructive_row_tools_reject_partial_list_name(monkeypatch, tool, args):
+    c = make_client()
+    c.get_list_raw = lambda oid: _list_with_rows()
+    c.delete_rows = _no_http
+    monkeypatch.setattr(server, "client", lambda: c)
+    with pytest.raises(IcaError):
+        getattr(server, tool)(*args, list_name="es")
+
+
+@pytest.mark.parametrize("tool,args", [("clear_checked", ()), ("remove_item", ("mjölk",))])
+@pytest.mark.parametrize("name,expected", [(None, "AAA-111"), ("", "AAA-111"), ("fest", "BBB-222")])
+def test_destructive_row_tools_exact_or_primary(monkeypatch, tool, args, name, expected):
+    c = make_client()
+    c.get_list_raw = lambda oid: _list_with_rows(oid)
+    deleted = []
+    c.delete_rows = lambda oid, ids: deleted.append(oid)
+    monkeypatch.setattr(server, "client", lambda: c)
+    getattr(server, tool)(*args, list_name=name)
+    assert deleted == [expected]
