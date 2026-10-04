@@ -202,8 +202,8 @@ def to_item(it) -> dict:
     aldrig). Enheten följer alltid UNITS; mängd utan enhet blir 'st', enhet
     utan mängd tas bort. Följer med om de finns: product_id (önskad
     ICA-produkt), fallback_product_id (receptets ingredientId), category
-    (avdelning, se products.Category) och product (kopplad produkt, se
-    IcaClient.link_products)."""
+    (avdelning, se products.Category), product (kopplad produkt, se
+    IcaClient.link_products) och recipes (receptandelar, se add_recipe_share)."""
     if isinstance(it, str):
         it = {"name": it}
     qty = _to_number(it.get("quantity"))
@@ -217,7 +217,25 @@ def to_item(it) -> dict:
         out["category"] = it["category"]
     if isinstance(it.get("product"), dict):
         out["product"] = it["product"]
+    if isinstance(it.get("recipes"), list):
+        out["recipes"] = [dict(r) for r in it["recipes"] if isinstance(r, dict) and r.get("id")]
     return out
+
+
+def add_recipe_share(item: dict, recipe_id: int, quantity, unit) -> None:
+    """Lägg till ett recepts andel av varan i item["recipes"] — ICA:s format
+    [{id, quantity, unit?}], som appen visar under "Tillagd från recept" (bild,
+    receptnamn, mängd). Samma recept + enhet summeras; ingen mängd = 0.0."""
+    shares = item.setdefault("recipes", [])
+    q = float(quantity or 0.0)
+    for s in shares:
+        if s["id"] == recipe_id and s.get("unit") == unit:
+            s["quantity"] = round(s["quantity"] + q, 3)
+            return
+    share = {"id": recipe_id, "quantity": q}
+    if unit:
+        share["unit"] = unit
+    shares.append(share)
 
 
 def format_item(it: dict) -> str:
@@ -498,7 +516,7 @@ class IcaClient:
         (se to_item). En vara med product (från link_products) kopplas till
         ICA-produkten som när man väljer ett förslag i appen; annars läggs den
         till som fritext, i avdelningen category om den finns (annars hamnar
-        den under Ospecificerad)."""
+        den under Ospecificerad). recipes blir radens "Tillagd från recept"."""
         rows = []
         for it in map(to_item, items):
             if not it["name"]:
@@ -508,7 +526,7 @@ class IcaClient:
                 "productName": it["name"],
                 "sourceId": -random.randint(10**6, 10**9),  # negativ = fri text
                 "isStrikedOver": False,
-                "recipes": [],
+                "recipes": it.get("recipes") or [],
             }
             p = it.get("product")
             if p:
@@ -699,12 +717,15 @@ class IcaClient:
         """Slå ihop ingredienser från ett eller flera recept till varor
         {name, quantity, unit} (se to_item). Samma namn + samma enhet summeras
         (2 dl + 3 dl mjölk → 5 dl mjölk); olika enheter blir separata varor.
-        Varor utan mängd (salt) tas med en gång. Ordningen bevaras.
+        Varor utan mängd (salt) tas med en gång. Ordningen bevaras. Varje
+        recepts andel sparas i recipes (se add_recipe_share), så att appen
+        visar varför varan finns på listan.
         ingredientId följer med som fallback_product_id: det används bara om
         namnet inte matchar en produkt, och aldrig för sammanslagning — det
         pekar ibland på en för grov produkt ('krossade tomater' → 'tomat')."""
         groups: dict[tuple, dict] = {}
         for r in recipes:
+            rid = r.get("id")
             for grp in r.get("ingredientGroups", []):
                 for ing in grp.get("ingredients", []):
                     name = (ing.get("ingredient") or ing.get("text") or "").strip()
@@ -719,6 +740,8 @@ class IcaClient:
                     g = groups.setdefault((name.lower(), it["unit"]), it)
                     if g is not it and it["quantity"]:
                         g["quantity"] = round((g["quantity"] or 0) + it["quantity"], 3)
+                    if isinstance(rid, int) and not isinstance(rid, bool):
+                        add_recipe_share(g, rid, it["quantity"], it["unit"])
         return list(groups.values())
 
     # ---------------------------------------------------- butiker

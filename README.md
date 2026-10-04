@@ -32,7 +32,7 @@ BankID required for accounts that support password login).
 | `create_shopping_list` / `delete_shopping_list` | Create / delete a list. New lists are linked to your primary favourite store (or `store_name`); the ICA app only shows categories for lists with a store |
 | `list_saved_recipes` / `get_recipe` | Your favourite recipes; one recipe's ingredients + steps |
 | `random_recipes` | Random recipes for inspiration |
-| `add_recipe_to_shopping_list` | Add a recipe's ingredients to a list, with their quantities and units |
+| `add_recipe_to_shopping_list` | Add a recipe's ingredients to a list, with their quantities and units. The app shows the recipe under *Tillagd från recept* on each item |
 | `list_stores` / `get_offers` | Your favourite stores; current offers for a store |
 | `get_bonus` | Your ICA bonus / Stammis balance |
 | `get_product` | Look up a product by barcode (EAN/GTIN) |
@@ -40,7 +40,7 @@ BankID required for accounts that support password login).
 | `link_item` | Sort an item already on a list: link it to a catalogue product or give it a section (category) |
 | `add_product_to_shopping_list` | Look up a barcode and add the product's name to a list |
 | `offers_on_my_list` | Which items on your list are on sale at a store |
-| `add_recipes_to_shopping_list` | Merge several recipes' ingredients onto one list |
+| `add_recipes_to_shopping_list` | Merge several recipes' ingredients onto one list; each item shows how much each recipe needs |
 | `plan_dinners` | Random weekly menu → one aggregated shopping list |
 
 Lists, items and stores are referenced **by name**, so an agent can act on
