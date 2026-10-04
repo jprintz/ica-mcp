@@ -310,8 +310,19 @@ def set_list_store(list_name: str | None = None, store_name: str | None = None) 
     c = client()
     L = c.resolve_list(list_name)
     store = c.resolve_store(store_name)
+    new = store.get("name") or store["id"]
+    old_id = L.get("sortingStore") or 0
+    if int(old_id) == int(store["id"]):
+        return f"Listan '{L.get('title')}' är redan kopplad till {new}."
     c.set_list_store(L["offlineId"], store["id"])
-    return f"Listan '{L.get('title')}' är nu kopplad till {store.get('name') or store['id']}."
+    if not old_id:
+        was = "utan butik"
+    else:
+        try:
+            was = c.get_store(old_id).get("marketingName") or f"butik {old_id}"
+        except IcaError:
+            was = f"butik {old_id}"
+    return f"Listan '{L.get('title')}' är nu kopplad till {new} (var: {was})."
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -550,16 +561,24 @@ def plan_dinners(count: int = 5, list_name: str | None = None,
     if not recipes:
         return {"error": "Kunde inte hämta recept."}
     items = IcaClient.aggregate_ingredients(recipes)
-    L = c.resolve_or_create_list(list_name or "Veckans middagar", store_name)
+    name = list_name or "Veckans middagar"
+    # store_name gäller bara en ny lista — säg till om den inte användes
+    existed = bool(store_name) and any(
+        L.get("title", "").lower() == name.strip().lower() for L in c.get_lists())
+    L = c.resolve_or_create_list(name, store_name)
     res = c.link_products(items, suggestions=0)
     c.add_rows(L["offlineId"], items)
-    return {
+    out = {
         "list": L.get("title"),
         "dinners": [{"id": r.get("id"), "title": r.get("title"),
                      "cookingTime": r.get("cookingTime")} for r in recipes],
         "ingredients_added": len(items),
         "linked_to_ica_products": res["linked"],
     }
+    if existed:
+        out["note"] = (f"Listan '{L.get('title')}' fanns redan, så store_name användes "
+                       "inte — listans butik är oförändrad. Byt med set_list_store.")
+    return out
 
 
 def serve() -> None:
