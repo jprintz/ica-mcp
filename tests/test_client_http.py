@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from conftest import FakeResponse, valid_state
+from helpers import FakeResponse, valid_state
 from ica_mcp.client import (
     API_BASE,
     AUTHORIZE_ENDPOINT,
@@ -252,3 +252,20 @@ def test_match_rows_unstruck_only():
     assert [r["offlineId"] for r in res] == ["r-1"]
     only_struck = {"rows": [ROWS["rows"][1]]}
     assert IcaClient.match_rows(only_struck, "mjölk", unstruck_only=True) == []
+
+
+def test_failed_refresh_falls_back_to_full_login(make_client):
+    # refresh-token har gått ut hos ICA → full inloggning med lösenordet
+    login = _login_handler()
+
+    def handler(method, url, kw):
+        if url == TOKEN_ENDPOINT and (kw.get("data") or {}).get("grant_type") == "refresh_token":
+            return FakeResponse(400, json_data={"error": "invalid_grant"})
+        return login(method, url, kw)
+
+    c = make_client(handler, password=PASSWORD, state=valid_state(access="OLD", seconds=-60))
+    c.authenticate()
+    grants = [(k.get("data") or {}).get("grant_type") for m, u, k in c.session.calls if u == TOKEN_ENDPOINT]
+    assert grants[0] == "refresh_token" and grants[-1] == "authorization_code"
+    with open(c.state_file, encoding="utf-8") as f:
+        assert json.load(f)["token"]["access_token"] == "ACC"
