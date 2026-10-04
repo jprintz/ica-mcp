@@ -1,10 +1,13 @@
 # ica-mcp
 
-[![CI](https://github.com/kanylbullen/ica-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/kanylbullen/ica-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/jprintz/ica-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/jprintz/ica-mcp/actions/workflows/ci.yml)
 
 An **MCP server for ICA** — Sweden's largest grocery chain — that lets AI agents
 (Claude, or any [Model Context Protocol](https://modelcontextprotocol.io) client)
-read and edit your ICA shopping lists in natural language:
+use your ICA account in natural language. Today that covers shopping lists,
+recipes, store offers, your bonus balance and product lookup. Shopping lists
+are the most developed part, but the scope is whatever the ICA app can do, not
+groceries or recipes in particular (see [Roadmap](#roadmap)).
 
 > *"What's on my shopping list?"* · *"Add coffee and bananas to the Willys list"* ·
 > *"Check off milk"* · *"Clear the checked items"*
@@ -17,6 +20,10 @@ BankID required for accounts that support password login).
 > by, or supported by ICA. It relies on a private, undocumented API that can change
 > or break at any time, and using it may be against ICA's terms of service. Use at
 > your own risk, for personal use only.
+
+This repository is a fork of [kanylbullen/ica-mcp](https://github.com/kanylbullen/ica-mcp)
+that has since grown well past its last release (see [Status](#status)). Tool
+descriptions and replies are in Swedish, matching the ICA app.
 
 ## Tools
 
@@ -46,6 +53,21 @@ BankID required for accounts that support password login).
 Lists, items and stores are referenced **by name**, so an agent can act on
 natural language. Omitting a list/store name targets your primary one (the
 `Handla` list / your first favourite store).
+
+### Safety around destructive tools
+
+The server can change your real ICA account, so the tools that delete data are
+deliberately strict:
+
+- `delete_shopping_list`, `remove_item` and `clear_checked` need the list's
+  **exact** name (or id). An empty name, the primary list by default, or a
+  partial match is refused instead of guessed. Read-only and additive tools
+  keep the forgiving name matching.
+- Every tool carries MCP annotations (read-only / write / destructive), so a
+  client can ask for confirmation before the destructive ones.
+- Barcodes must be 8–14 digits before they are looked up.
+- Quantities and units are validated; an unknown recipe unit stays in the item
+  name instead of being dropped.
 
 ### Product linking and categories
 
@@ -127,18 +149,20 @@ on Windows, macOS and Linux:
 #   Windows:      winget install --id=astral-sh.uv -e
 #   macOS/Linux:  curl -LsSf https://astral.sh/uv/install.sh | sh
 
-uv tool install ica-mcp
+uv tool install git+https://github.com/jprintz/ica-mcp
 uv tool update-shell      # puts `ica-mcp` on PATH — then open a NEW terminal
 ```
 
-> For the latest unreleased code use the repo instead of PyPI:
-> `uv tool install git+https://github.com/kanylbullen/ica-mcp`
+> **Install from the repo, not PyPI.** The `ica-mcp` package on PyPI is the
+> original project's `0.5.0`, not this fork. It has none of the work described
+> under [Status](#status): no product linking, merging, structured quantities,
+> `set_list_store`, destructive-tool safety or auth hardening.
 
 <details>
 <summary>Fallback without uv (plain pip + venv)</summary>
 
 ```bash
-git clone https://github.com/kanylbullen/ica-mcp.git
+git clone https://github.com/jprintz/ica-mcp.git
 cd ica-mcp
 python3 -m venv .venv
 .venv\Scripts\pip install .      # Windows
@@ -242,22 +266,108 @@ public in that project), not user secrets.
   lists). Write operations were validated against throwaway lists during
   development.
 
+## Status
+
+**Shipped**
+
+| Phase | What |
+|---|---|
+| 1 | Shopping lists: view, add, check off, remove, clear, create, delete |
+| 2 | Recipes, store offers, bonus balance |
+| 3 | Product / barcode lookup |
+| 4 | Smart flows: `offers_on_my_list`, `add_recipes_to_shopping_list`, `plan_dinners` |
+| 5 | Hardening and list quality: exact-name safety for destructive tools, structured quantities, per-list store (`set_list_store`), product linking and `search_products`, recipe attribution, merging duplicate rows, auth-state fixes (stale or rotated tokens), tests and CI |
+
+This fork is distributed from this repository only. It is not published to
+PyPI (the `ica-mcp` package there is the original project's `0.5.0`).
+
 ## Roadmap
 
-Done: **shopping lists** (phase 1); **recipes + offers + bonus** (phase 2);
-**product / barcode lookup** (phase 3); **smart flows** (phase 4 —
-`offers_on_my_list`, `add_recipes_to_shopping_list`, `plan_dinners`).
+The scope is anything the ICA app does for your account. It is not tied to
+food, recipes or any one feature. What can be built depends on the endpoints
+we can reach: the server only talks to ICA endpoints the mobile app already
+uses, and we only know the ones listed under *Known services* below.
 
-Planned next, on the same auth:
+### Known services
 
-- **Recipe search** by phrase — deferred: `recipes/search` &
-  `searchwithfilters` return HTTP 500 for every GET param shape tried (and 405
-  on POST), so the real request shape needs capturing from live app traffic.
-- **Personal offers** across stores
-- Unit tests + CI, and a PyPI release
+All under the `sverige/digx/mobile/` gateway path:
+`shoppinglistservice`, `recipeservice`, `storeservice`, `offerservice`,
+`bonusservice`, `productservice`. Each tool in this server maps onto one of
+them. Anything outside this list is unmapped, not known to be unavailable.
+
+### Doable now (known endpoints)
+
+- **Undo for destructive tools** — keep the last removed rows so
+  `remove_item` and `clear_checked` can be reverted.
+- **Clear a list's store** in `set_list_store`.
+- **Better `search_products` suggestions for Swedish compound words**
+  (`basmatiris` should suggest `ris`). Suggestions only; nothing is linked
+  from a search.
+- **Cross-process lock around token refresh**, so two servers sharing one
+  login cannot rotate the refresh token over each other.
+
+### Needs a prototype first
+
+- **Offers-aware flows** — use a store's offers to guide what gets added to a
+  list or planned. The data is already reachable (`get_offers`), but this
+  would be a heuristic and it is untested. A check against one live store
+  (259 offers) showed:
+  - Offers cover the whole store, not just food: about half were home,
+    health and beauty items. That makes it a general feature, not a grocery one.
+  - Offer names are generic ("Pasta", "Citroner", "Kronljus"), so matching
+    them against anything else (list items, recipe ingredients) is fuzzy.
+    Plain word matching misses plurals and compounds ("paprikor" vs "Röd
+    spetspaprika"). `offers_on_my_list` already has this weakness.
+  - Offers change weekly.
+
+  The first step would be to measure how good the matching is on real lists
+  before building a tool around it.
+
+### Needs API discovery first
+
+Beyond the six services above, the app very likely calls more. Nobody has
+mapped them, so this is the biggest unknown. Anything here needs the endpoint
+found and its request and response shapes captured before any code can be
+written. Capturing needs a Swedish connection and an ICA login. Ways to find
+them, roughly cheapest first:
+
+1. **Read what others have mapped** (ha-ica-todo, svendahlstrand/ica-api).
+   Costs nothing, but the second one covers the old, defunct backend.
+2. **Static analysis of the Android app** (decompile the APK and list the
+   `digx/mobile` service paths and models). No pinning problems, and it works
+   without a Swedish IP. It gives paths and shapes but not live behaviour.
+3. **Capture live traffic** (mitmproxy against an emulator or phone). This
+   confirms real request and response shapes. Certificate pinning in the app
+   may block it.
+4. **Probe the gateway** with an authenticated read-only request per candidate
+   path. This is the most intrusive option and is the last resort.
+
+Known open items:
+
+- **Recipe search by phrase.** `recipes/search` and `searchwithfilters`
+  return HTTP 500 for every GET parameter shape tried (and 405 on POST), so
+  the real request shape is unknown.
+- **Personal offers across stores.** We only read per-store offers
+  (`offersdiscounts/{store}`). Those already include some offers flagged
+  personal, shown as `personal` in `get_offers`. Whether the app has a separate
+  endpoint covering all stores is unknown.
+
+### Not planned
+
+- **Portion scaling and a pantry / "already have" list.** Out of scope: this
+  server edits lists, it doesn't manage recipes or a household inventory.
+- **BankID login.** Only accounts that log in with personnummer + password
+  work.
+- **Running outside Sweden.** ICA's gateway answers HTTP 451 to other IPs.
+- **Ordering / checkout / ICA online shopping.** A different system that has
+  not been explored, and one that would spend real money.
+- **A hosted multi-user service.** It would mean holding other people's ICA
+  passwords. The server is meant to run on your own machine, for your own
+  account.
 
 ## Credits
 
+- Forked from [kanylbullen/ica-mcp](https://github.com/kanylbullen/ica-mcp)
 - Auth flow ported from [LazyTarget/ha-ica-todo](https://github.com/LazyTarget/ha-ica-todo)
 - Historical API reference: [svendahlstrand/ica-api](https://github.com/svendahlstrand/ica-api)
   (documents the now-defunct `handla.api.ica.se` backend)
@@ -269,10 +379,15 @@ pip install -e ".[test]"
 pytest
 ```
 
-Tests (`tests/`) cover the **pure helpers only** — ingredient aggregation,
-offer/recipe formatting, list/row matching, PKCE and redirect/form parsing. The
-live ICA API can't run in CI (it needs a Swedish IP and a login), so it's
-exercised manually. CI runs the suite on Python 3.10–3.13.
+The suite (`tests/`, ~300 tests) runs offline against a mocked HTTP layer and
+fake clients: auth-state handling, ingredient aggregation and merging, product
+linking, quantity parsing, recipe attribution, the safety rules and tool
+annotations, and the pure formatting helpers. The live ICA API can't run in CI
+(it needs a Swedish IP and a login), so end-to-end behaviour is checked by
+hand, against throwaway lists.
+
+CI runs the suite on Python 3.10–3.13, plus once against the lowest supported
+`mcp` version.
 
 ## License
 
