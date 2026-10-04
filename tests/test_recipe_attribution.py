@@ -89,3 +89,14 @@ def test_plain_items_have_empty_recipes(monkeypatch):
     monkeypatch.setattr(server, "_client", c)
     server.add_items([server.Item(name="mjölk")])
     assert c.synced[0]["createdRows"][0]["recipes"] == []
+
+
+def test_unknown_unit_share_has_no_quantity():
+    # mängden står i namnet ('vitlök (5 klyftor)'), så andelen får ingen mängd
+    r1 = _recipe(1, {"ingredient": "vitlök", "quantity": 3, "unit": "klyftor"})
+    r2 = _recipe(2, {"ingredient": "vitlök", "quantity": 2, "unit": "klyftor"},
+                 {"text": "en nypa salt"})
+    vitlok, salt = IcaClient.aggregate_ingredients([r1, r2])
+    assert vitlok["name"] == "vitlök (5 klyftor)" and vitlok["quantity"] is None
+    assert vitlok["recipes"] == [{"id": 1, "quantity": 0.0}, {"id": 2, "quantity": 0.0}]
+    assert salt["name"] == "en nypa salt" and salt["recipes"] == [{"id": 2, "quantity": 0.0}]

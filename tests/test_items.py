@@ -17,10 +17,19 @@ def _it(name, quantity=None, unit=None):
 # ------------------------------------------------------------ normalize_unit
 @pytest.mark.parametrize("unit, expected", [
     (None, None), ("", None), ("dl", "dl"), ("DL", "dl"), ("st.", "st"),
-    ("förp", "förp"), ("burk", "st"), ("port", "st"),
+    ("förp", "förp"), ("burk", "st"), ("påsar", "st"), ("pkt", "förp"),
+    ("paket", "förp"), ("Förpackning", "förp"), ("liter", "l"), ("kilo", "kg"),
+    ("gram", "g"), ("matsked", "msk"),
 ])
 def test_normalize_unit(unit, expected):
     assert normalize_unit(unit) == expected
+
+
+@pytest.mark.parametrize("unit", ["klyftor", "nypa", "cm", "port", "knippe"])
+def test_normalize_unit_rejects_unknown(unit):
+    # att gissa 'st' ändrar betydelsen (3 klyftor vitlök ≠ 3 st vitlök)
+    with pytest.raises(ValueError):
+        normalize_unit(unit)
 
 
 def test_units_are_ica_standard():
@@ -44,7 +53,7 @@ def test_to_item_never_parses_text():
 
 def test_format_item():
     assert format_item(_it("grädde", 2.0, "dl")) == "2 dl grädde"
-    assert format_item(_it("potatis", 1.5, "kg")) == "1.5 kg potatis"
+    assert format_item(_it("potatis", 1.5, "kg")) == "1,5 kg potatis"
     assert format_item(_it("salt")) == "salt"
 
 
@@ -53,6 +62,17 @@ def test_item_rejects_non_standard_unit():
     with pytest.raises(ValidationError):
         Item(name="tomater", quantity=2, unit="burk")
     assert Item(name="tomater", quantity=2, unit="st").unit == "st"
+
+
+@pytest.mark.parametrize("bad", [0, -2, float("inf"), float("nan"), 1e9])
+def test_item_rejects_bad_quantity(bad):
+    with pytest.raises(ValidationError):
+        Item(name="mjölk", quantity=bad, unit="l")
+
+
+@pytest.mark.parametrize("raw", [float("inf"), float("nan"), -1, 0.0004, "abc"])
+def test_to_item_drops_unusable_quantity(raw):
+    assert to_item({"name": "mjölk", "quantity": raw, "unit": "l"}) == _it("mjölk")
 
 
 def test_add_items_schema_is_structured_with_unit_enum():
