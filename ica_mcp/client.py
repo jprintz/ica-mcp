@@ -123,7 +123,7 @@ def _ts() -> str:
     return _now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def normalize_personnummer(value: str | None) -> str | None:
+def normalize_personnummer(value: str | None, today: dt.date | None = None) -> str | None:
     """Returnera personnumret som 12 siffror, eller ``None``.
 
     ICA:s authenticate-endpoint kräver sekelsiffror och svarar annars HTTP 400
@@ -135,6 +135,7 @@ def normalize_personnummer(value: str | None) -> str | None:
     1900-talet. Samordningsnummer (dag + 60) påverkas inte. Ett ``+`` som
     skiljetecken (10 siffror) betyder att personen är 100 år eller äldre, så då
     används sekelsiffran ett steg tidigare (``261010+1234`` -> 1926).
+    ``today`` (standard: dagens datum) avgör vad som räknas som framtid.
     """
     if value is None:
         return None
@@ -142,12 +143,13 @@ def normalize_personnummer(value: str | None) -> str | None:
     if len(digits) == 12:
         return digits
     if len(digits) == 10:
-        yy = int(digits[:2])
-        current_yy = dt.date.today().year % 100
-        century = 20 if yy <= current_yy else 19
+        today = today or dt.date.today()
+        year = today.year // 100 * 100 + int(digits[:2])
+        if year > today.year:
+            year -= 100  # framtida år → förra seklet
         if "+" in str(value):
-            century -= 1
-        return f"{century}{digits}"
+            year -= 100  # 100 år eller äldre
+        return f"{year // 100}{digits}"
     # Låt övriga längder passera oförändrade — servern får avgöra.
     return digits or None
 
