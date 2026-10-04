@@ -9,6 +9,7 @@ Verktyg:
   check_off / uncheck   – bocka av / ångra en vara
   remove_item           – ta bort en vara helt
   create_shopping_list  – skapa ny lista (kopplad till en butik)
+  set_list_store        – koppla en befintlig lista till en butik
   delete_shopping_list  – radera en lista
   clear_checked         – ta bort alla avbockade varor
   list_saved_recipes    – dina favoritrecept
@@ -219,6 +220,30 @@ def create_shopping_list(title: str, store_name: str | None = None) -> str:
     c = client()
     L = c.create_list(title, store_id=c.store_id_for(store_name))
     return f"Skapade listan '{L.get('title')}'{_store_note(L)}."
+
+
+@mcp.tool(annotations=WRITE)
+def set_list_store(list_name: str | None = None, store_name: str | None = None) -> str:
+    """Koppla en befintlig inköpslista till en butik, så att ICA-appen visar
+    kategorier och sorterar efter butiken. store_name matchas mot dina
+    favoritbutiker (utelämna för din primära butik); utelämna list_name för
+    den primära listan. Varorna på listan påverkas inte."""
+    c = client()
+    L = c.resolve_list(list_name)
+    store = c.resolve_store(store_name)
+    new = store.get("name") or store["id"]
+    old_id = L.get("sortingStore") or 0
+    if int(old_id) == int(store["id"]):
+        return f"Listan '{L.get('title')}' är redan kopplad till {new}."
+    c.set_list_store(L["offlineId"], store["id"])
+    if not old_id:
+        was = "utan butik"
+    else:
+        try:
+            was = c.get_store(old_id).get("marketingName") or f"butik {old_id}"
+        except IcaError:
+            was = f"butik {old_id}"
+    return f"Listan '{L.get('title')}' är nu kopplad till {new} (var: {was})."
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -438,7 +463,7 @@ def plan_dinners(count: int = 5, list_name: str | None = None,
     }
     if existed:
         out["note"] = (f"Listan '{L.get('title')}' fanns redan, så store_name användes "
-                       "inte — listans butik är oförändrad.")
+                       "inte — listans butik är oförändrad. Byt med set_list_store.")
     return out
 
 
