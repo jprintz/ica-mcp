@@ -25,7 +25,7 @@ import logging
 import os
 import random
 import re
-import shutil
+import tempfile
 import threading
 import uuid
 from os import urandom
@@ -179,36 +179,77 @@ class IcaClient:
             if legacy == self.state_file or not os.path.isfile(legacy):
                 continue
             try:
-                _ensure_parent_dir(self.state_file)
-                shutil.copyfile(legacy, self.state_file)
-                try:
-                    os.chmod(self.state_file, 0o600)
-                except OSError:
-                    pass
+                with open(legacy, encoding="utf-8") as f:
+                    data = json.load(f)
+                self._write_state_file(data)  # skapas 0600 från start (ingen läsbar glugg)
                 _LOG.info("Migrerade auth-state från %s → %s", legacy, self.state_file)
-            except OSError as e:
+            except (OSError, ValueError) as e:
                 _LOG.warning("Kunde inte migrera %s: %s", legacy, e)
             return
+
+    def _read_state_file(self) -> dict | None:
+        """Läs state-filen; None om den saknas eller är oläsbar/ogiltig."""
+        try:
+            with open(self.state_file, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else None
+        except (OSError, ValueError):
+            return None
 
     def _load_state(self) -> dict:
         if not os.path.exists(self.state_file):
             self._migrate_legacy_state()
         if os.path.exists(self.state_file):
-            try:
-                with open(self.state_file, encoding="utf-8") as f:
-                    return json.load(f)
-            except (OSError, ValueError):
-                _LOG.warning("Kunde inte läsa %s, börjar om.", self.state_file)
+            data = self._read_state_file()
+            if data is not None:
+                return data
+            _LOG.warning("Kunde inte läsa %s, börjar om.", self.state_file)
         return {}
+
+    def _write_state_file(self, data: dict) -> None:
+        """Atomisk skrivning: temp-fil (0600 från start via mkstemp) i samma
+        katalog → flush + fsync → os.replace. Städar temp-filen vid fel."""
+        _ensure_parent_dir(self.state_file)
+        fd, tmp = tempfile.mkstemp(
+            dir=os.path.dirname(self.state_file) or ".", prefix=".auth_state.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.state_file)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def _save_state(self) -> None:
         try:
-            _ensure_parent_dir(self.state_file)
-            with open(self.state_file, "w", encoding="utf-8") as f:
-                json.dump(self._state, f, ensure_ascii=False, indent=2)
-            os.chmod(self.state_file, 0o600)  # nära no-op på Windows (bara read-only-biten)
-        except OSError as e:
+            self._write_state_file(self._state)
+        except (OSError, TypeError, ValueError) as e:
             _LOG.warning("Kunde inte spara auth-state: %s", e)
+
+    def _reload_state_from_disk(self, stale_access: str | None) -> bool:
+        """Läs om state-filen (en annan process kan ha loggat in/refreshat).
+        Returnerar True om filen har en giltig token som skiljer sig från den
+        föråldrade ``stale_access`` — då antas filens state och inget nätverksanrop
+        behövs. Annars antas filens state ändå om refresh-token/klient skiljer."""
+        data = self._read_state_file()
+        if not data:
+            return False
+        tok = data.get("token") or {}
+        if self._token_valid(tok) and tok["access_token"] != stale_access:
+            self._state = data
+            return True
+        mine = self._state.get("token") or {}
+        if tok.get("refresh_token") and data.get("client") and (
+            tok["refresh_token"] != mine.get("refresh_token")
+            or data["client"] != self._state.get("client")
+        ):
+            self._state = data
+        return False
 
     # ------------------------------------------------------------ auth-steg
     @staticmethod
@@ -220,6 +261,15 @@ class IcaClient:
         if not m:
             raise IcaAuthError(f"Hittade inte '{key}' i redirect: {location!r}")
         return m.group(1)
+
+    @staticmethod
+    def _location(r: requests.Response) -> str:
+        loc = r.headers.get("Location")
+        if not loc:
+            raise IcaAuthError(
+                f"ICA svarade utan redirect (HTTP {r.status_code}, saknar Location-header) "
+                "— inloggningsflödet kan ha ändrats, eller så gick något fel hos ICA.")
+        return loc
 
     @staticmethod
     def _hidden(html: str, name: str) -> str:
@@ -270,8 +320,9 @@ class IcaClient:
             "prompt": "login", "acr": ACR,
         }, allow_redirects=False, timeout=30)
         r.raise_for_status()
-        state = self._qs(r.headers["Location"], "state")
-        self.session.get(r.headers["Location"], timeout=30).raise_for_status()
+        loc = self._location(r)
+        state = self._qs(loc, "state")
+        self.session.get(loc, timeout=30).raise_for_status()
         # 4. posta uppgifter
         r = self.session.post(LOGIN_ENDPOINT,
                               data={"userName": self.username, "password": self.password}, timeout=30)
@@ -283,7 +334,7 @@ class IcaClient:
                               data={"token": sso_token, "state": state},
                               allow_redirects=False, timeout=30)
         r.raise_for_status()
-        code = self._qs(r.headers["Location"], "code")
+        code = self._qs(self._location(r), "code")
         r = self.session.post(TOKEN_ENDPOINT, data={
             "code": code, "client_id": client["client_id"], "client_secret": client["client_secret"],
             "grant_type": "authorization_code", "scope": client["scope"],
@@ -324,6 +375,10 @@ class IcaClient:
             tok = self._state.get("token")
             if not force_refresh and tok and self._token_valid(tok):
                 return tok["access_token"]
+            # en annan process kan redan ha refreshat/loggat in — läs om filen först
+            if self._reload_state_from_disk(tok.get("access_token") if tok else None):
+                return self._state["token"]["access_token"]
+            tok = self._state.get("token")
             # försök refresh
             if tok and tok.get("refresh_token") and self._state.get("client"):
                 try:
