@@ -50,3 +50,17 @@ def test_none_and_empty():
 def test_odd_lengths_pass_through_digits_only(odd):
     out = normalize_personnummer(odd)
     assert out is None or out.isdigit()
+
+
+def test_plus_separator_means_century_earlier():
+    # 10 siffror + "+" = 100 år eller äldre: ett sekel tidigare än vanligt.
+    assert normalize_personnummer("261010+1234") == ("19" if 26 <= CURRENT_YY else "18") + "2610101234"
+    yy = f"{CURRENT_YY:02d}"
+    assert normalize_personnummer(f"{yy}1010+1234") == f"19{yy}10101234"
+    yy = f"{(CURRENT_YY + 5) % 100:02d}"
+    assert normalize_personnummer(f"{yy}1010+1234") == f"18{yy}10101234"
+    assert normalize_personnummer("991231+1234") == "18" + "9912311234"
+
+
+def test_plus_ignored_for_twelve_digits():
+    assert normalize_personnummer("19261010+1234") == "192610101234"

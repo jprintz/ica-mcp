@@ -132,7 +132,9 @@ def normalize_personnummer(value: str | None) -> str | None:
     ``197801011234``.
 
     Sekel härleds ur tvåsiffrigt år: ett år som ligger i framtiden tolkas som
-    1900-talet. Samordningsnummer (dag + 60) påverkas inte.
+    1900-talet. Samordningsnummer (dag + 60) påverkas inte. Ett ``+`` som
+    skiljetecken (10 siffror) betyder att personen är 100 år eller äldre, så då
+    används sekelsiffran ett steg tidigare (``261010+1234`` -> 1926).
     """
     if value is None:
         return None
@@ -142,8 +144,10 @@ def normalize_personnummer(value: str | None) -> str | None:
     if len(digits) == 10:
         yy = int(digits[:2])
         current_yy = dt.date.today().year % 100
-        century = "20" if yy <= current_yy else "19"
-        return century + digits
+        century = 20 if yy <= current_yy else 19
+        if "+" in str(value):
+            century -= 1
+        return f"{century}{digits}"
     # Låt övriga längder passera oförändrade — servern får avgöra.
     return digits or None
 
