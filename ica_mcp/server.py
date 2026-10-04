@@ -5,7 +5,7 @@ ICA MCP-server (stdio) — låter agenter läsa och redigera dina ICA-inköpslis
 Verktyg:
   list_shopping_lists   – alla dina listor + hur många varor kvar/avbockade
   view_shopping_list    – innehållet i en lista
-  add_items             – lägg till varor (fri text) på en lista
+  add_items             – lägg till varor (namn, mängd, enhet) på en lista
   check_off / uncheck   – bocka av / ångra en vara
   remove_item           – ta bort en vara helt
   create_shopping_list  – skapa ny lista
@@ -39,8 +39,9 @@ import sys
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field
 
-from .client import IcaClient, IcaError, validate_barcode
+from .client import IcaClient, IcaError, Unit, format_item, to_item, validate_barcode
 
 # Logga till stderr (stdout är reserverat för MCP-protokollet!)
 logging.basicConfig(level=logging.INFO, stream=sys.stderr,
@@ -87,6 +88,15 @@ def _resolve_rows(list_obj: dict, item: str, unstruck_only: bool = False) -> lis
     return matches
 
 
+class Item(BaseModel):
+    """En vara med valfri mängd och enhet."""
+    name: str = Field(description="Varans namn utan mängd, t.ex. 'grädde'")
+    quantity: float | None = Field(None, description="Mängd, t.ex. 2 eller 1.5")
+    unit: Unit | None = Field(
+        None, description="Enhet. Använd st för styck/burk/påse/flaska o.d.; "
+                          "mängd utan enhet blir st.")
+
+
 # -------------------------------------------------------------------- tools
 @mcp.tool(annotations=READ)
 def list_shopping_lists() -> list[dict]:
@@ -120,14 +130,19 @@ def view_shopping_list(list_name: str | None = None) -> dict:
 
 
 @mcp.tool(annotations=WRITE)
-def add_items(items: list[str], list_name: str | None = None) -> str:
-    """Lägg till en eller flera varor (fri text, t.ex. 'mjölk', '2 kg potatis')
-    på en inköpslista. Utelämna list_name för den primära listan."""
-    if not items:
+def add_items(items: list[Item], list_name: str | None = None) -> str:
+    """Lägg till en eller flera varor på en inköpslista, var och en som
+    {name, quantity?, unit?}, t.ex. {name: 'grädde', quantity: 2, unit: 'dl'}
+    eller bara {name: 'mjölk'}. Lägg mängd och enhet i sina fält, inte i namnet.
+    Utelämna list_name för den primära listan."""
+    parsed = [to_item(i.model_dump()) for i in items]
+    parsed = [i for i in parsed if i["name"]]
+    if not parsed:
         return "Inga varor angivna."
     L = client().resolve_list(list_name)
-    client().add_rows(L["offlineId"], list(items))
-    return f"La till {len(items)} vara/varor på '{L.get('title')}': {', '.join(items)}"
+    client().add_rows(L["offlineId"], parsed)
+    return (f"La till {len(parsed)} vara/varor på '{L.get('title')}': "
+            f"{', '.join(map(format_item, parsed))}")
 
 
 @mcp.tool(annotations=WRITE)
@@ -235,11 +250,11 @@ def random_recipes(count: int = 3) -> list[dict]:
 
 @mcp.tool(annotations=WRITE)
 def add_recipe_to_shopping_list(recipe_id: int, list_name: str | None = None) -> str:
-    """Lägg alla ingredienser från ett recept som varor på en inköpslista
-    (fri text, t.ex. '8 dl mjölk'). Utelämna list_name för primärlistan."""
+    """Lägg alla ingredienser från ett recept som varor på en inköpslista, med
+    mängd och enhet (t.ex. 8 dl mjölk). Utelämna list_name för primärlistan."""
     c = client()
     recipe = c.get_recipe(recipe_id)
-    items = IcaClient.recipe_ingredient_texts(recipe)
+    items = IcaClient.aggregate_ingredients([recipe])
     if not items:
         return f"Receptet '{recipe.get('title')}' saknar ingredienser."
     L = c.resolve_list(list_name)
@@ -320,7 +335,7 @@ def add_product_to_shopping_list(ean: str, list_name: str | None = None) -> str:
     if not p:
         return f"Ingen produkt hittades för EAN {ean}."
     L = c.resolve_list(list_name)
-    c.add_rows(L["offlineId"], [p["name"]])
+    c.add_rows(L["offlineId"], [{"name": p["name"]}])  # produktnamn tolkas inte
     return f"La till '{p['name']}' på '{L.get('title')}'."
 
 
