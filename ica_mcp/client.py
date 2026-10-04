@@ -716,9 +716,14 @@ class IcaClient:
 
     def store_id_for(self, ref=None) -> int:
         """Butiks-id för en ny lista: favoritbutiken ref (id eller namn), annars
-        den primära (första favoriten). 0 = ingen butik (inga favoritbutiker)."""
+        den primära (första favoriten). 0 = ingen butik (inga favoritbutiker,
+        eller standardbutiken kunde inte hämtas — då skapas listan ändå)."""
         if ref is None or str(ref).strip() == "":
-            ids = self.get_favorite_store_ids()
+            try:
+                ids = self.get_favorite_store_ids()
+            except IcaError as e:
+                _LOG.warning("Kunde inte hämta favoritbutik, skapar listan utan butik: %s", e)
+                return 0
             return int(ids[0]) if ids else 0
         return int(self.resolve_store(ref)["id"])
 
