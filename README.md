@@ -297,8 +297,6 @@ them. Anything outside this list is unmapped, not known to be unavailable.
 
 ### Doable now (known endpoints)
 
-- **Undo for destructive tools** — keep the last removed rows so
-  `remove_item` and `clear_checked` can be reverted.
 - **Clear a list's store** in `set_list_store`.
 - **Better `search_products` suggestions for Swedish compound words**
   (`basmatiris` should suggest `ris`). Suggestions only; nothing is linked
