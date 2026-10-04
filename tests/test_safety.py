@@ -86,6 +86,27 @@ def test_server_tools_handle_invalid_barcode(monkeypatch):
     assert "streckkod" in server.add_product_to_shopping_list("abc")
 
 
+def test_server_tools_surface_api_errors(monkeypatch):
+    # Giltig kod men ICA svarar med fel (451, 5xx …) — ska inte se ut som "finns inte"
+    c = IcaClient.__new__(IcaClient)
+
+    def _fail(*a, **k):
+        raise IcaError("HTTP 451 från ICA-gatewayen")
+    c._api = _fail
+    monkeypatch.setattr(server, "client", lambda: c)
+    for tool in (server.get_product, server.add_product_to_shopping_list):
+        with pytest.raises(IcaError, match="451"):
+            tool("7310865004703")
+
+
+def test_requirements_txt_matches_pyproject():
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).resolve().parent.parent
+    req = re.search(r"^mcp([^\s#]*)", (root / "requirements.txt").read_text(), re.M).group(1)
+    assert f'"mcp{req}"' in (root / "pyproject.toml").read_text()
+
+
 def test_delete_shopping_list_requires_exact(monkeypatch):
     c = make_client()
     c.delete_list = _no_http

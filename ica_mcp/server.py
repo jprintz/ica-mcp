@@ -40,7 +40,7 @@ import sys
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from .client import IcaClient, IcaError
+from .client import IcaClient, IcaError, validate_barcode
 
 # Logga till stderr (stdout är reserverat för MCP-protokollet!)
 logging.basicConfig(level=logging.INFO, stream=sys.stderr,
@@ -297,9 +297,10 @@ def get_product(ean: str) -> dict:
     """Slå upp en produkt via streckkod (EAN/GTIN). Returnerar namn +
     artikelgrupp, eller found=False om koden inte finns."""
     try:
-        p = client().get_product(ean)
-    except IcaError as e:
+        validate_barcode(ean)
+    except IcaError as e:  # bara ogiltig kod — API-fel ska synas som fel
         return {"found": False, "ean": ean, "message": str(e)}
+    p = client().get_product(ean)
     if not p:
         return {"found": False, "ean": ean, "message": f"Ingen produkt för EAN {ean}."}
     return {"found": True, "ean": p.get("gtin"), "name": p.get("name"),
@@ -310,11 +311,12 @@ def get_product(ean: str) -> dict:
 def add_product_to_shopping_list(ean: str, list_name: str | None = None) -> str:
     """Slå upp en streckkod (EAN/GTIN) och lägg produktens namn på en lista.
     Utelämna list_name för primärlistan."""
-    c = client()
     try:
-        p = c.get_product(ean)
-    except IcaError as e:
+        validate_barcode(ean)
+    except IcaError as e:  # bara ogiltig kod — API-fel ska synas som fel
         return str(e)
+    c = client()
+    p = c.get_product(ean)
     if not p:
         return f"Ingen produkt hittades för EAN {ean}."
     L = c.resolve_list(list_name)
