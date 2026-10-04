@@ -101,6 +101,11 @@ verification** below.
 
 ## Workflow
 
+- **One worktree per branch.** Several agents may work in this repo at once.
+  Never `git switch`/`checkout` in a checkout you did not create, and never
+  stage files you did not change. Start work with
+  `git worktree add ../ica-mcp-<topic> -b <type>/<topic> origin/main` and give
+  the worktree its own `.venv`.
 - One branch per change: `feat/`, `fix/`, `chore/`, `test/`. Conventional
   commit messages (`feat: …`, `fix: …`). Small PRs into `main`; CI must be
   green. Keep the README tool table in sync when the tool surface changes.
