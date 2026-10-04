@@ -228,7 +228,8 @@ def to_item(it) -> dict:
     utan mängd tas bort, och okänd enhet med mängd ger ValueError (se
     normalize_unit). Följer med om de finns: product_id (önskad ICA-produkt),
     fallback_product_id (receptets ingredientId), category (avdelning, se
-    products.Category) och product (kopplad produkt, se IcaClient.link_products)."""
+    products.Category), product (kopplad produkt, se IcaClient.link_products)
+    och recipes (receptandelar, se add_recipe_share)."""
     if isinstance(it, str):
         it = {"name": it}
     qty = _to_number(it.get("quantity"))
@@ -242,7 +243,37 @@ def to_item(it) -> dict:
         out["category"] = it["category"]
     if isinstance(it.get("product"), dict):
         out["product"] = it["product"]
+    if isinstance(it.get("recipes"), list):
+        out["recipes"] = [dict(r) for r in it["recipes"] if isinstance(r, dict) and r.get("id")]
     return out
+
+
+def recipe_id_of(recipe: dict) -> int | None:
+    """Receptets id som int — även om ICA skickar det som sträng ('123')."""
+    rid = recipe.get("id")
+    if isinstance(rid, bool):
+        return None
+    if isinstance(rid, int):
+        return rid
+    if isinstance(rid, str) and rid.strip().isdigit():
+        return int(rid)
+    return None
+
+
+def add_recipe_share(item: dict, recipe_id: int, quantity, unit) -> None:
+    """Lägg till ett recepts andel av varan i item["recipes"] — ICA:s format
+    [{id, quantity, unit?}], som appen visar under "Tillagd från recept" (bild,
+    receptnamn, mängd). Samma recept + enhet summeras; ingen mängd = 0.0."""
+    shares = item.setdefault("recipes", [])
+    q = float(quantity or 0.0)
+    for s in shares:
+        if s["id"] == recipe_id and s.get("unit") == unit:
+            s["quantity"] = round(s["quantity"] + q, 3)
+            return
+    share = {"id": recipe_id, "quantity": q}
+    if unit:
+        share["unit"] = unit
+    shares.append(share)
 
 
 def format_quantity(q: float) -> str:
@@ -537,7 +568,7 @@ class IcaClient:
         (se to_item). En vara med product (från link_products) kopplas till
         ICA-produkten som när man väljer ett förslag i appen; annars läggs den
         till som fritext, i avdelningen category om den finns (annars hamnar
-        den under Ospecificerad)."""
+        den under Ospecificerad). recipes blir radens "Tillagd från recept"."""
         rows = []
         for it in map(to_item, items):
             if not it["name"]:
@@ -547,7 +578,7 @@ class IcaClient:
                 "productName": it["name"],
                 "sourceId": -random.randint(10**6, 10**9),  # negativ = fri text
                 "isStrikedOver": False,
-                "recipes": [],
+                "recipes": it.get("recipes") or [],
             }
             if it.get("product"):
                 apply_product(row, it["product"])
@@ -743,26 +774,33 @@ class IcaClient:
         """Slå ihop ingredienser från ett eller flera recept till varor
         {name, quantity, unit} (se to_item). Samma namn + samma enhet summeras
         (2 dl + 3 dl mjölk → 5 dl mjölk); olika enheter blir separata varor.
-        Varor utan mängd (salt) tas med en gång. Ordningen bevaras.
+        Varor utan mängd (salt) tas med en gång. Ordningen bevaras. Varje
+        recepts andel sparas i recipes (se add_recipe_share), så att appen
+        visar varför varan finns på listan.
 
         Mängder i enheter som saknar ICA-motsvarighet (3 klyftor vitlök)
         summeras per enhet men behålls i namnet – 'vitlök (3 klyftor)' – i
-        stället för att bli '3 st'. Saknas ingrediensnamn används receptraden
-        som den är, utan separat mängd (den står redan i texten).
+        stället för att bli '3 st'; deras receptandel får då ingen mängd.
+        Saknas ingrediensnamn används receptraden som den är, utan separat
+        mängd (den står redan i texten).
 
         ingredientId följer med som fallback_product_id: det används bara om
         namnet inte matchar en produkt, och aldrig för sammanslagning — det
         pekar ibland på en för grov produkt ('krossade tomater' → 'tomat')."""
         groups: dict[tuple, dict] = {}
         for r in recipes:
+            rid = recipe_id_of(r)
+            is_rid = rid is not None
             for grp in r.get("ingredientGroups", []):
                 for ing in grp.get("ingredients", []):
                     name = (ing.get("ingredient") or "").strip()
                     if not name:
                         text = (ing.get("text") or "").strip()
                         if text:
-                            groups.setdefault((text.lower(), None), to_item(
+                            g = groups.setdefault((text.lower(), None), to_item(
                                 {"name": text, "fallback_product_id": ing.get("ingredientId")}))
+                            if is_rid:
+                                add_recipe_share(g, rid, None, None)
                         continue
                     unit = ing.get("unit")
                     first, _, rest = name.partition(" ")
@@ -781,6 +819,10 @@ class IcaClient:
                     g = groups.setdefault(key, it)
                     if g is not it and it["quantity"]:
                         g["quantity"] = round((g["quantity"] or 0) + it["quantity"], 3)
+                    if is_rid:
+                        # okänd enhet: mängden står i namnet, inte i andelen
+                        q = None if "_raw_unit" in it else it["quantity"]
+                        add_recipe_share(g, rid, q, it["unit"])
         out = []
         for g in groups.values():
             raw = g.pop("_raw_unit", None)

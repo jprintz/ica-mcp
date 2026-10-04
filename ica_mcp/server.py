@@ -44,8 +44,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from .client import (IcaClient, IcaError, Unit, apply_product, format_item, to_item,
-                     validate_barcode)
+from .client import (IcaClient, IcaError, Unit, apply_product, format_item, recipe_id_of,
+                     to_item, validate_barcode)
 from .products import ARTICLE_GROUPS, CATEGORY_IDS, UNSPECIFIED, Category, ProductCatalog
 
 # Logga till stderr (stdout är reserverat för MCP-protokollet!)
@@ -399,9 +399,12 @@ def _recipe_link_note(res: dict, items: list[dict]) -> str:
 @mcp.tool(annotations=WRITE)
 def add_recipe_to_shopping_list(recipe_id: int, list_name: str | None = None) -> str:
     """Lägg alla ingredienser från ett recept som varor på en inköpslista, med
-    mängd och enhet (t.ex. 8 dl mjölk). Utelämna list_name för primärlistan."""
+    mängd och enhet (t.ex. 8 dl mjölk). I appen visas receptet under "Tillagd
+    från recept" på varje vara. Utelämna list_name för primärlistan."""
     c = client()
     recipe = c.get_recipe(recipe_id)
+    if recipe_id_of(recipe) is None:  # saknas/oläsbart id → det vi bad om
+        recipe = {**recipe, "id": recipe_id}
     items = IcaClient.aggregate_ingredients([recipe])
     if not items:
         return f"Receptet '{recipe.get('title')}' saknar ingredienser."
@@ -543,7 +546,8 @@ def offers_on_my_list(list_name: str | None = None,
 def add_recipes_to_shopping_list(recipe_ids: list[int],
                                  list_name: str | None = None) -> str:
     """Lägg ingredienserna från FLERA recept på en lista, ihopslagna (samma
-    vara + enhet summeras). Utelämna list_name för primärlistan."""
+    vara + enhet summeras). Varje recepts andel visas under "Tillagd från
+    recept" i appen. Utelämna list_name för primärlistan."""
     c = client()
     recipes = []
     for rid in recipe_ids:
