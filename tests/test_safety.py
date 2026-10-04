@@ -107,6 +107,14 @@ def test_server_tools_surface_api_errors(monkeypatch):
             tool("7310865004703")
 
 
+def test_mcp_call_passes_ica_error_message_to_agent(monkeypatch):
+    # mcp 2.x döljer texten i okända undantag; IcaError ska nå agenten via ToolError
+    from mcp.server.mcpserver.exceptions import ToolError
+    monkeypatch.setattr(server, "client", lambda: make_client())
+    with pytest.raises(ToolError, match="Dina listor"):
+        asyncio.run(server.mcp.call_tool("delete_shopping_list", {"list_name": "es"}))
+
+
 def test_requirements_txt_matches_pyproject():
     import pathlib
     import re
@@ -137,11 +145,11 @@ def test_tool_annotations():
         a = t.annotations
         assert a is not None, name
         if name in READ:
-            assert a.readOnlyHint is True, name
+            assert a.read_only_hint is True, name
         elif name in DESTRUCTIVE:
-            assert a.readOnlyHint is False and a.destructiveHint is True, name
+            assert a.read_only_hint is False and a.destructive_hint is True, name
         else:
-            assert a.readOnlyHint is False and a.destructiveHint is False, name
+            assert a.read_only_hint is False and a.destructive_hint is False, name
 
 
 def _list_with_rows(offline_id="BBB-222", title="Fest"):

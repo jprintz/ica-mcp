@@ -77,7 +77,7 @@ def test_to_item_drops_unusable_quantity(raw):
 
 def test_add_items_schema_is_structured_with_unit_enum():
     tool = next(t for t in asyncio.run(mcp.list_tools()) if t.name == "add_items")
-    schema = tool.inputSchema
+    schema = tool.input_schema
     item = schema["$defs"]["Item"]
     assert schema["properties"]["items"]["items"] == {"$ref": "#/$defs/Item"}  # inga fria strängar
     unit_enum = next(s["enum"] for s in item["properties"]["unit"]["anyOf"] if "enum" in s)

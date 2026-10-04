@@ -1,12 +1,12 @@
 """Loggning: serve() ska ge 'NIVÅ namn: meddelande' på stderr, även fast
-FastMCP redan har konfigurerat root-loggern vid import."""
+MCPServer redan har konfigurerat root-loggern vid import."""
 
 import logging
 
 from ica_mcp import server
 
 
-def test_configure_logging_overrides_fastmcp_format(capsys):
+def test_configure_logging_overrides_mcpserver_format(capsys):
     root = logging.getLogger()
     saved = (root.handlers[:], root.level)
     try:

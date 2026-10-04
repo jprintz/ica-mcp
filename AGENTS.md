@@ -6,8 +6,8 @@ keep it true: when a rule here stops matching the code, fix one of them.
 
 ## What this is
 
-An MCP server (Python, FastMCP) that gives AI agents access to a real ICA
-account: shopping lists, recipes, store offers, bonus and the product
+An MCP server (Python, MCP SDK `MCPServer`) that gives AI agents access to a
+real ICA account: shopping lists, recipes, store offers, bonus and the product
 catalogue. ICA has no public API; the server talks to the private backend the
 ICA mobile app uses. This repo (`jprintz/ica-mcp`) is a fork of
 `kanylbullen/ica-mcp` and is well ahead of upstream and of the PyPI package.
@@ -20,7 +20,7 @@ The server **modifies a real account**. Treat every write path as production.
 |---|---|
 | `ica_mcp/client.py` | `IcaClient`: OAuth/PKCE login against Curity, token cache (0600 state file, atomic writes, re-read before refresh), all HTTP to `apimgw-pub.ica.se`, list and row operations (`/sync`), item parsing (`to_item`, units), merging (`plan_additions`, `merge_quantities`), recipe aggregation. The only module that knows HTTP. |
 | `ica_mcp/products.py` | ICA's product catalogue (~6 900 generic products): exact match, ranked search, memory + disk cache, section ids (`CATEGORY_IDS`). |
-| `ica_mcp/server.py` | The MCP tools. Thin: resolve names → call the client → return a short Swedish reply. Every tool carries a `READ`, `WRITE` or `DESTRUCTIVE` annotation. |
+| `ica_mcp/server.py` | The MCP tools. Thin: resolve names → call the client → return a short Swedish reply. Every tool is registered with `@tool(READ \| WRITE \| DESTRUCTIVE)`, which also turns `IcaError` into a `ToolError` so the agent sees the message. |
 | `ica_mcp/cli.py` | `ica-mcp serve \| login \| status \| register`. `login` is separate because a password prompt cannot run over the stdio transport. |
 | `tests/` | Offline only. `tests/helpers.py` has `FakeSession`/`FakeResponse`; `conftest.py` has the `make_client` fixture (explicit state file in `tmp_path`, env cleared). |
 | `.github/workflows/` | `ci.yml`: lint, tests on 3.10–3.13, and tests against the lowest supported `mcp`. There is no publish workflow; the fork is installed from git. |
@@ -91,8 +91,8 @@ verification** below.
   The formatter is not enforced; match the surrounding hand-wrapped, compact
   style rather than reformatting a file. `from __future__ import annotations`,
   type hints, `dict`/`list` builtins.
-- **Compatibility.** Python 3.10+ (CI matrix 3.10–3.13). `mcp>=1.14,<2`, and CI
-  tests the floor, so do not use newer FastMCP features without bumping it.
+- **Compatibility.** Python 3.10+ (CI matrix 3.10–3.13). `mcp>=2.0,<3`, and CI
+  tests the floor, so do not use newer MCPServer features without bumping it.
 - **Pure logic goes in `client.py`/`products.py` as plain functions** so it is
   testable without a client (`to_item`, `plan_additions`, `merge_quantities`,
   `ProductCatalog.search`). `server.py` stays thin.
