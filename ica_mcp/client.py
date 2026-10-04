@@ -114,6 +114,15 @@ class IcaAuthError(IcaError):
     """Inloggning/refresh misslyckades."""
 
 
+def validate_barcode(ean) -> str:
+    """Ta bort mellanslag och kräv 8–14 siffror (EAN-8/UPC/EAN-13/GTIN-14).
+    Returnerar den rena koden, annars IcaError."""
+    s = re.sub(r"\s+", "", "" if ean is None else str(ean))
+    if not (s.isascii() and s.isdigit() and 8 <= len(s) <= 14):
+        raise IcaError(f"Ogiltig streckkod {ean!r}: ange 8–14 siffror (EAN/GTIN).")
+    return s
+
+
 def _now_utc() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -440,11 +449,28 @@ class IcaClient:
         return self._sync(offline_id, {"deletedRows": list(row_offline_ids)})
 
     # ---------------------------------------------------- resolvers
-    def resolve_list(self, ref: str | int | None = None) -> dict:
-        """Hitta en lista via titel, numeriskt id eller offlineId. None = primär."""
+    def resolve_list(self, ref: str | int | None = None, exact: bool = False) -> dict:
+        """Hitta en lista via titel, numeriskt id eller offlineId. None = primär.
+        exact=True (för destruktiva anrop): kräver icke-tomt ref och exakt träff
+        på id, offlineId eller hel titel – ingen primärlista, ingen delmatchning."""
         lists = self.get_lists()
         if not lists:
             raise IcaError("Du har inga inköpslistor.")
+        if exact:
+            s = "" if ref is None else str(ref).strip()
+            if not s:
+                raise IcaError("Ange listans exakta namn (tomt namn tillåts inte här).")
+            low = s.lower()
+            # Samla träffar på id, offlineId OCH titel: om t.ex. en listas id
+            # råkar vara en annan listas titel ska vi vägra, inte gissa.
+            hits = [L for L in lists if str(L.get("id")) == s
+                    or L.get("offlineId", "").lower() == low
+                    or L.get("title", "").strip().lower() == low]
+            if len(hits) > 1:
+                raise IcaError(f"Flera listor matchar exakt {ref!r}: {[L['title'] for L in hits]}")
+            if hits:
+                return hits[0]
+            raise IcaError(f"Ingen lista heter exakt {ref!r}. Dina listor: {[L['title'] for L in lists]}")
         if ref is None or str(ref).strip() == "":
             return lists[0]  # ICA returnerar primärlistan ("Handla") först
         s = str(ref).strip()
@@ -628,6 +654,8 @@ class IcaClient:
 
     # ---------------------------------------------------- produkt (streckkod)
     def get_product(self, ean) -> dict | None:
-        """Produktinfo för en EAN/GTIN, eller None om koden inte finns (404)."""
+        """Produktinfo för en EAN/GTIN, eller None om koden inte finns (404).
+        Ogiltig streckkod ger IcaError utan nätverksanrop."""
+        ean = validate_barcode(ean)
         r = self._api("GET", f"{PRODUCT_PATH}/product/{ean}", allow_404=True)
         return None if r.status_code == 404 else r.json()
