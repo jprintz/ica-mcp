@@ -24,14 +24,14 @@ BankID required for accounts that support password login).
 |---|---|
 | `list_shopping_lists` | All your lists + how many items remain/checked |
 | `view_shopping_list` | Contents of a list (by name; defaults to your primary list) |
-| `add_items` | Add one or more free-text items to a list |
+| `add_items` | Add one or more items to a list, each with a name and an optional quantity and unit (`st`, `förp`, `kg`, `hg`, `g`, `l`, `dl`, `cl`, `ml`, `msk`, `tsk`, `krm`) |
 | `check_off` / `uncheck` | Mark an item bought / undo |
 | `remove_item` | Remove an item entirely |
 | `clear_checked` | Remove all checked items (tidy up after shopping) |
 | `create_shopping_list` / `delete_shopping_list` | Create / delete a list |
 | `list_saved_recipes` / `get_recipe` | Your favourite recipes; one recipe's ingredients + steps |
 | `random_recipes` | Random recipes for inspiration |
-| `add_recipe_to_shopping_list` | Add a recipe's ingredients to a list as free-text items |
+| `add_recipe_to_shopping_list` | Add a recipe's ingredients to a list, with their quantities and units |
 | `list_stores` / `get_offers` | Your favourite stores; current offers for a store |
 | `get_bonus` | Your ICA bonus / Stammis balance |
 | `get_product` | Look up a product by barcode (EAN/GTIN) |

@@ -24,19 +24,66 @@ def _recipe(*ingredients):
 def test_aggregate_sums_same_name_and_unit():
     r1 = _recipe({"ingredient": "mjölk", "quantity": 8, "unit": "dl", "text": "8 dl mjölk"})
     r2 = _recipe({"ingredient": "mjölk", "quantity": 2, "unit": "dl", "text": "2 dl mjölk"})
-    assert IcaClient.aggregate_ingredients([r1, r2]) == ["10 dl mjölk"]
+    assert IcaClient.aggregate_ingredients([r1, r2]) == [
+        {"name": "mjölk", "quantity": 10.0, "unit": "dl"}]
 
 
 def test_aggregate_sums_unitless_count():
     r1 = _recipe({"ingredient": "ägg", "quantity": 4, "text": "4 ägg"})
     r2 = _recipe({"ingredient": "ägg", "quantity": 2, "text": "2 ägg"})
-    assert IcaClient.aggregate_ingredients([r1, r2]) == ["6 ägg"]
+    assert IcaClient.aggregate_ingredients([r1, r2]) == [
+        {"name": "ägg", "quantity": 6.0, "unit": "st"}]
 
 
 def test_aggregate_keeps_distinct_lines_on_unit_mismatch():
     r1 = _recipe({"ingredient": "smör", "quantity": 50, "unit": "g", "text": "50 g smör"})
     r2 = _recipe({"ingredient": "smör", "quantity": 1, "unit": "msk", "text": "1 msk smör"})
-    assert IcaClient.aggregate_ingredients([r1, r2]) == ["50 g smör", "1 msk smör"]
+    assert IcaClient.aggregate_ingredients([r1, r2]) == [
+        {"name": "smör", "quantity": 50.0, "unit": "g"},
+        {"name": "smör", "quantity": 1.0, "unit": "msk"}]
+
+
+def test_aggregate_keeps_ingredient_without_text_or_quantity():
+    # ICA anger "ingen mängd" som quantity 0.0; varan ska ändå med, en gång
+    r1 = _recipe({"ingredient": "salt"})
+    r2 = _recipe({"ingredient": "salt", "quantity": 0.0, "text": "salt"})
+    assert IcaClient.aggregate_ingredients([r1, r2]) == [
+        {"name": "salt", "quantity": None, "unit": None}]
+
+
+def test_aggregate_normalizes_units():
+    r = _recipe({"ingredient": "krossade tomater", "quantity": 2, "unit": "burk"},
+                {"ingredient": "krossade tomater", "quantity": 1, "unit": "st"})
+    assert IcaClient.aggregate_ingredients([r]) == [
+        {"name": "krossade tomater", "quantity": 3.0, "unit": "st"}]
+
+
+def test_aggregate_maps_unit_aliases():
+    r = _recipe({"ingredient": "jäst", "quantity": 1, "unit": "pkt"},
+                {"ingredient": "jäst", "quantity": 1, "unit": "förp"},
+                {"ingredient": "mjölk", "quantity": 1, "unit": "liter"})
+    assert IcaClient.aggregate_ingredients([r]) == [
+        {"name": "jäst", "quantity": 2.0, "unit": "förp"},
+        {"name": "mjölk", "quantity": 1.0, "unit": "l"}]
+
+
+def test_aggregate_keeps_unknown_unit_in_name():
+    # 3 klyftor vitlök får inte bli '3 st' och slås ihop med riktiga st
+    r1 = _recipe({"ingredient": "vitlök", "quantity": 3, "unit": "klyftor"},
+                 {"ingredient": "vitlök", "quantity": 1, "unit": "st"},
+                 {"ingredient": "salt", "quantity": 1, "unit": "nypa"})
+    r2 = _recipe({"ingredient": "vitlök", "quantity": 2, "unit": "klyftor"})
+    assert IcaClient.aggregate_ingredients([r1, r2]) == [
+        {"name": "vitlök (5 klyftor)", "quantity": None, "unit": None},
+        {"name": "vitlök", "quantity": 1.0, "unit": "st"},
+        {"name": "salt (1 nypa)", "quantity": None, "unit": None}]
+
+
+def test_aggregate_text_fallback_has_no_extra_quantity():
+    # utan ingrediensnamn används radtexten – mängden står redan där
+    r = _recipe({"text": "2 dl grädde", "quantity": 2, "unit": "dl"})
+    assert IcaClient.aggregate_ingredients([r]) == [
+        {"name": "2 dl grädde", "quantity": None, "unit": None}]
 
 
 def test_aggregate_empty():

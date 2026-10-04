@@ -22,6 +22,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -29,6 +30,7 @@ import shutil
 import threading
 import uuid
 from os import urandom
+from typing import Literal, get_args
 from urllib.parse import urlparse, parse_qs
 
 import platformdirs
@@ -155,6 +157,85 @@ def normalize_personnummer(value: str | None) -> str | None:
         return century + digits
     # Låt övriga längder passera oförändrade — servern får avgöra.
     return digits or None
+
+
+# --------------------------------------------------------------------------
+# Varor: mängd + enhet
+# --------------------------------------------------------------------------
+# Enheterna som ICA-appen använder.
+Unit = Literal["st", "förp", "kg", "hg", "g", "l", "dl", "cl", "ml", "msk", "tsk", "krm"]
+UNITS: tuple[str, ...] = get_args(Unit)
+
+
+def _to_number(value) -> float | None:
+    """2 / 1.5 / '1,5' → float; tomt, 0, negativt, inf/nan eller ogiltigt →
+    None (ICA anger "ingen mängd" som 0)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        n = float(str(value).strip().replace(",", ".")) if isinstance(value, str) else float(value)
+    except ValueError:
+        return None
+    if not math.isfinite(n):
+        return None
+    n = round(n, 3)
+    return n if n > 0 else None
+
+
+# Stavningar i receptdata/fritext → ICA-enhet. Förpackningar som köps hela
+# (burk, påse, flaska) räknas som st; paket/ask som förp.
+_UNIT_ALIASES = {
+    **{u: u for u in UNITS},
+    "styck": "st", "stycken": "st", "stk": "st",
+    "burk": "st", "burkar": "st", "påse": "st", "påsar": "st",
+    "flaska": "st", "flaskor": "st",
+    "förpackning": "förp", "förpackningar": "förp", "pkt": "förp", "paket": "förp",
+    "ask": "förp", "askar": "förp",
+    "kilo": "kg", "kilogram": "kg", "hekto": "hg", "hektogram": "hg",
+    "gr": "g", "gram": "g",
+    "liter": "l", "deciliter": "dl", "centiliter": "cl", "milliliter": "ml",
+    "matsked": "msk", "matskedar": "msk", "tesked": "tsk", "teskedar": "tsk",
+    "kryddmått": "krm",
+}
+
+
+def normalize_unit(unit) -> str | None:
+    """Enhet → en av UNITS ('liter' → 'l', 'pkt' → 'förp', 'burk' → 'st').
+    Tomt/None → None. Okända enheter ('klyftor', 'nypa', 'cm') ger ValueError:
+    de går inte att uttrycka i ICA:s enheter utan att mängden ändrar betydelse."""
+    if unit is None:
+        return None
+    u = str(unit).strip().lower().rstrip(".")
+    if not u:
+        return None
+    try:
+        return _UNIT_ALIASES[u]
+    except KeyError:
+        raise ValueError(f"okänd enhet {unit!r}") from None
+
+
+def to_item(it) -> dict:
+    """Normalisera en vara till {name, quantity, unit}. En dict {name,
+    quantity?, unit?} eller en sträng (= bara namn; texten tolkas aldrig).
+    Enheten följer alltid UNITS; mängd utan enhet blir 'st', enhet utan mängd
+    tas bort. Okänd enhet med mängd ger ValueError (se normalize_unit)."""
+    if isinstance(it, str):
+        it = {"name": it}
+    qty = _to_number(it.get("quantity"))
+    unit = (normalize_unit(it.get("unit")) or "st") if qty else None
+    return {"name": str(it.get("name") or "").strip(), "quantity": qty, "unit": unit}
+
+
+def format_quantity(q: float) -> str:
+    """1.5 → '1,5', 2.0 → '2' (svensk decimalkomma)."""
+    return f"{q:g}".replace(".", ",")
+
+
+def format_item(it: dict) -> str:
+    """{name: 'grädde', quantity: 2.0, unit: 'dl'} → '2 dl grädde'."""
+    if not it.get("quantity"):
+        return it["name"]
+    return " ".join(p for p in (format_quantity(it["quantity"]), it.get("unit"), it["name"]) if p)
 
 
 class IcaClient:
@@ -422,10 +503,11 @@ class IcaClient:
         return self._api("POST", f"{SL_PATH}/{offline_id}/sync", payload).json()
 
     def add_rows(self, offline_id: str, items: list) -> dict:
+        """Lägg till varor: dicts {name, quantity?, unit?} (se to_item)."""
         rows = []
-        for it in items:
-            if isinstance(it, str):
-                it = {"name": it}
+        for it in map(to_item, items):
+            if not it["name"]:
+                continue
             row = {
                 "offlineId": str(uuid.uuid4()).upper(),
                 "productName": it["name"],
@@ -438,6 +520,8 @@ class IcaClient:
             if it.get("unit"):
                 row["unit"] = it["unit"]
             rows.append(row)
+        if not rows:
+            raise IcaError("Inga varor att lägga till.")
         return self._sync(offline_id, {"createdRows": rows})
 
     def change_rows(self, offline_id: str, rows: list[dict]) -> dict:
@@ -560,31 +644,47 @@ class IcaClient:
         }
 
     @staticmethod
-    def aggregate_ingredients(recipes: list[dict]) -> list[str]:
-        """Slå ihop ingredienser från flera recept. Samma vara + samma enhet
-        summeras ('2 dl' + '3 dl mjölk' → '5 dl mjölk'); vid olika/saknad enhet
-        listas de distinkta ursprungsraderna. Ordningen bevaras."""
-        from collections import OrderedDict
-        groups: "OrderedDict[str, list]" = OrderedDict()
+    def aggregate_ingredients(recipes: list[dict]) -> list[dict]:
+        """Slå ihop ingredienser från ett eller flera recept till varor
+        {name, quantity, unit} (se to_item). Samma vara + samma enhet summeras
+        (2 dl + 3 dl mjölk → 5 dl mjölk); olika enheter blir separata varor.
+        Varor utan mängd (salt) tas med en gång. Ordningen bevaras.
+
+        Mängder i enheter som saknar ICA-motsvarighet (3 klyftor vitlök)
+        summeras per enhet men behålls i namnet – 'vitlök (3 klyftor)' – i
+        stället för att bli '3 st'. Saknas ingrediensnamn används receptraden
+        som den är, utan separat mängd (den står redan i texten)."""
+        groups: dict[tuple, dict] = {}
         for r in recipes:
             for grp in r.get("ingredientGroups", []):
                 for ing in grp.get("ingredients", []):
-                    name = (ing.get("ingredient") or ing.get("text") or "").strip()
-                    if name:
-                        groups.setdefault(name.lower(), []).append(ing)
-        lines: list[str] = []
-        for ings in groups.values():
-            name = ings[0].get("ingredient") or ings[0].get("text") or ""
-            units = {(i.get("unit") or "") for i in ings}
-            qtys = [i.get("quantity") for i in ings]
-            if len(units) == 1 and all(isinstance(q, (int, float)) for q in qtys) and any(qtys):
-                unit = ings[0].get("unit")
-                total = f"{sum(qtys):g}"
-                lines.append(f"{total}{(' ' + unit) if unit else ''} {name}".strip())
-            else:
-                for t in dict.fromkeys(i.get("text") for i in ings if i.get("text")):
-                    lines.append(t)
-        return lines
+                    name = (ing.get("ingredient") or "").strip()
+                    if not name:
+                        text = (ing.get("text") or "").strip()
+                        if text:
+                            groups.setdefault((text.lower(), None),
+                                              {"name": text, "quantity": None, "unit": None})
+                        continue
+                    try:
+                        it = to_item({"name": name, "quantity": ing.get("quantity"),
+                                      "unit": ing.get("unit")})
+                        key = (name.lower(), it["unit"])
+                    except ValueError:
+                        raw = str(ing.get("unit")).strip()
+                        it = {"name": name, "quantity": _to_number(ing.get("quantity")),
+                              "unit": None, "_raw_unit": raw}
+                        key = (name.lower(), "raw:" + raw.lower())
+                    g = groups.setdefault(key, it)
+                    if g is not it and it["quantity"]:
+                        g["quantity"] = round((g["quantity"] or 0) + it["quantity"], 3)
+        out = []
+        for g in groups.values():
+            raw = g.pop("_raw_unit", None)
+            if raw is not None:
+                g = {"name": f"{g['name']} ({format_quantity(g['quantity'])} {raw})",
+                     "quantity": None, "unit": None}
+            out.append(g)
+        return out
 
     # ---------------------------------------------------- butiker
     def get_favorite_store_ids(self) -> list[int]:
