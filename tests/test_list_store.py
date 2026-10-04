@@ -95,7 +95,7 @@ def test_set_list_store_is_annotated_as_write():
 
     from ica_mcp.server import mcp
     tool = next(t for t in asyncio.run(mcp.list_tools()) if t.name == "set_list_store")
-    assert tool.annotations.readOnlyHint is False and tool.annotations.destructiveHint is False
+    assert tool.annotations.read_only_hint is False and tool.annotations.destructive_hint is False
 
 def test_default_store_lookup_failure_still_creates_list():
     class _Down(_Fake):

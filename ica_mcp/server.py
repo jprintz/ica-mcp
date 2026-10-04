@@ -36,11 +36,13 @@ Logga in en gång först med `ica-mcp login`.
 
 from __future__ import annotations
 
+import functools
 import logging
 import re
 import sys
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
@@ -58,12 +60,30 @@ from .products import ARTICLE_GROUPS, CATEGORY_IDS, UNSPECIFIED, Category, Produ
 
 _LOG = logging.getLogger("ica_mcp")
 
-mcp = FastMCP("ICA")
+mcp = MCPServer("ICA")
 
 # MCP-etiketter så klienter vet vad verktygen gör
-READ = ToolAnnotations(readOnlyHint=True)
-WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
-DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+READ = ToolAnnotations(read_only_hint=True)
+WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False)
+DESTRUCTIVE = ToolAnnotations(read_only_hint=False, destructive_hint=True)
+
+
+def tool(annotations: ToolAnnotations):
+    """Registrera ett MCP-verktyg. IcaError blir ToolError så att agenten får
+    meddelandet (vad som matchade, giltiga val). mcp 2.x visar annars bara
+    'Error executing tool <namn>' för andra undantag; övriga fel förblir dolda."""
+    def register(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except IcaError as e:
+                raise ToolError(str(e)) from e
+        mcp.tool(annotations=annotations)(wrapper)
+        return fn  # direkta anrop (tester) får IcaError som förut
+    return register
+
+
 _client: IcaClient | None = None
 
 
@@ -175,7 +195,7 @@ class Item(BaseModel):
 
 
 # -------------------------------------------------------------------- tools
-@mcp.tool(annotations=READ)
+@tool(READ)
 def list_shopping_lists() -> list[dict]:
     """Lista alla dina ICA-inköpslistor med antal varor kvar och avbockade.
     Den första listan är din primära ('Handla') och används som standard när
@@ -193,7 +213,7 @@ def list_shopping_lists() -> list[dict]:
     return out
 
 
-@mcp.tool(annotations=READ)
+@tool(READ)
 def view_shopping_list(list_name: str | None = None) -> dict:
     """Visa innehållet i en inköpslista. list_name matchas mot listans titel
     (utelämna för den primära listan). Returnerar varor uppdelat i kvar/avbockade."""
@@ -206,7 +226,7 @@ def view_shopping_list(list_name: str | None = None) -> dict:
             "summary": f"{len(remaining)} kvar, {len(checked)} avbockade"}
 
 
-@mcp.tool(annotations=WRITE)
+@tool(WRITE)
 def add_items(items: list[Item], list_name: str | None = None, merge: bool = True) -> str:
     """Lägg till en eller flera varor på en inköpslista, var och en som
     {name, quantity?, unit?}, t.ex. {name: 'grädde', quantity: 2, unit: 'dl'}
@@ -231,7 +251,7 @@ def add_items(items: list[Item], list_name: str | None = None, merge: bool = Tru
     return head + _merge_note(added) + _link_note(_only_new(res, added))
 
 
-@mcp.tool(annotations=WRITE)
+@tool(WRITE)
 def link_item(item: str, product_id: int | None = None, category: Category | None = None,
               list_name: str | None = None) -> str:
     """Sortera en vara som redan finns på listan, t.ex. en under Ospecificerad:
@@ -261,7 +281,7 @@ def link_item(item: str, product_id: int | None = None, category: Category | Non
     return f"'{rows[0].get('productName')}' på '{fresh.get('title')}' är nu kopplad till {where}."
 
 
-@mcp.tool(annotations=WRITE)
+@tool(WRITE)
 def check_off(item: str, list_name: str | None = None) -> str:
     """Bocka av en vara (markera som köpt/klar) på en lista."""
     c = client()
@@ -274,7 +294,7 @@ def check_off(item: str, list_name: str | None = None) -> str:
     return f"Bockade av '{rows[0].get('productName')}' på '{fresh.get('title')}'."
 
 
-@mcp.tool(annotations=WRITE)
+@tool(WRITE)
 def uncheck(item: str, list_name: str | None = None) -> str:
     """Ångra avbockning av en vara (markera som ej köpt igen)."""
     c = client()
@@ -294,7 +314,7 @@ def _resolve_destructive(c, list_name: str | None) -> dict:
     return c.resolve_list(list_name, exact=True)
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
+@tool(DESTRUCTIVE)
 def remove_item(item: str, list_name: str | None = None) -> str:
     """Ta bort en vara helt från en lista (inte samma som att bocka av).
     list_name måste vara listans exakta namn; utelämnat = primärlistan."""
@@ -306,7 +326,7 @@ def remove_item(item: str, list_name: str | None = None) -> str:
     return f"Tog bort '{rows[0].get('productName')}' från '{fresh.get('title')}'."
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
+@tool(DESTRUCTIVE)
 def clear_checked(list_name: str | None = None) -> str:
     """Ta bort alla avbockade varor från en lista (rensa upp efter handling).
     list_name måste vara listans exakta namn; utelämnat = primärlistan."""
@@ -326,7 +346,7 @@ def _store_note(L: dict) -> str:
             " (utan butik: lägg till en favoritbutik i ICA-appen för att få kategorier)")
 
 
-@mcp.tool(annotations=WRITE)
+@tool(WRITE)
 def create_shopping_list(title: str, store_name: str | None = None) -> str:
     """Skapa en ny inköpslista med angiven titel, kopplad till en butik (krävs
     för att ICA-appen ska visa kategorier). store_name matchas mot dina
@@ -336,7 +356,7 @@ def create_shopping_list(title: str, store_name: str | None = None) -> str:
     return f"Skapade listan '{L.get('title')}'{_store_note(L)}."
 
 
-@mcp.tool(annotations=WRITE)
+@tool(WRITE)
 def set_list_store(list_name: str | None = None, store_name: str | None = None) -> str:
     """Koppla en befintlig inköpslista till en butik, så att ICA-appen visar
     kategorier och sorterar efter butiken. store_name matchas mot dina
@@ -360,7 +380,7 @@ def set_list_store(list_name: str | None = None, store_name: str | None = None) 
     return f"Listan '{L.get('title')}' är nu kopplad till {new} (var: {was})."
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
+@tool(DESTRUCTIVE)
 def delete_shopping_list(list_name: str) -> str:
     """Radera en hel inköpslista. Kräver listans EXAKTA namn (eller id); tomt
     namn, primärlistan som standard och delmatchning tillåts inte."""
@@ -371,7 +391,7 @@ def delete_shopping_list(list_name: str) -> str:
 
 
 # ------------------------------------------------------------------ recept
-@mcp.tool(annotations=READ)
+@tool(READ)
 def list_saved_recipes(limit: int = 12) -> dict:
     """Lista dina favoritmarkerade recept (senast tillagda först). Hämtar
     detaljer per recept, så håll limit lågt (standard 12)."""
@@ -388,7 +408,7 @@ def list_saved_recipes(limit: int = 12) -> dict:
     return {"total_saved": len(refs), "showing": len(recipes), "recipes": recipes}
 
 
-@mcp.tool(annotations=READ)
+@tool(READ)
 def get_recipe(recipe_id: int) -> dict:
     """Hämta ett recept: titel, tid, portioner, ingredienser (fri text) och
     tillagningssteg."""
@@ -399,7 +419,7 @@ def get_recipe(recipe_id: int) -> dict:
     return s
 
 
-@mcp.tool(annotations=READ)
+@tool(READ)
 def random_recipes(count: int = 3) -> list[dict]:
     """Hämta slumpmässiga recept för inspiration (count 1–10)."""
     count = max(1, min(int(count), 10))
@@ -422,7 +442,7 @@ def _recipe_link_note(res: dict, items: list[dict]) -> str:
     return note
 
 
-@mcp.tool(annotations=WRITE)
+@tool(WRITE)
 def add_recipe_to_shopping_list(recipe_id: int, list_name: str | None = None) -> str:
     """Lägg alla ingredienser från ett recept som varor på en inköpslista, med
     mängd och enhet (t.ex. 8 dl mjölk). I appen visas receptet under "Tillagd
@@ -443,14 +463,14 @@ def add_recipe_to_shopping_list(recipe_id: int, list_name: str | None = None) ->
 
 
 # ------------------------------------------------------ erbjudanden / butiker
-@mcp.tool(annotations=READ)
+@tool(READ)
 def list_stores() -> list[dict]:
     """Lista dina favoritbutiker (id, namn, ort). Den första är standardbutik
     för erbjudanden."""
     return client().get_favorite_stores()
 
 
-@mcp.tool(annotations=READ)
+@tool(READ)
 def get_offers(store_name: str | None = None, query: str | None = None,
                limit: int = 40) -> dict:
     """Hämta aktuella erbjudanden för en butik. store_name matchas mot dina
@@ -469,7 +489,7 @@ def get_offers(store_name: str | None = None, query: str | None = None,
             "offers": offers[:max(1, int(limit))]}
 
 
-@mcp.tool(annotations=READ)
+@tool(READ)
 def get_bonus() -> dict:
     """Visa din ICA-bonus/Stammis: kupongvärde, aktiva kuponger och rabatt hittills."""
     b = client().get_bonus()
@@ -486,7 +506,7 @@ def get_bonus() -> dict:
 
 
 # ------------------------------------------------------------------ produkt
-@mcp.tool(annotations=READ)
+@tool(READ)
 def get_product(ean: str) -> dict:
     """Slå upp en produkt via streckkod (EAN/GTIN). Returnerar namn +
     artikelgrupp, eller found=False om koden inte finns."""
@@ -501,7 +521,7 @@ def get_product(ean: str) -> dict:
             "articleId": p.get("articleId"), "articleGroupId": p.get("articleGroupId")}
 
 
-@mcp.tool(annotations=READ)
+@tool(READ)
 def search_products(query: str, limit: int = 10) -> list[dict]:
     """Sök i ICA:s produktregister (generiska varor som 'mjölk', 'krossad
     tomat'). Använd för att hitta product_id när add_items inte kunde koppla en
@@ -514,7 +534,7 @@ def search_products(query: str, limit: int = 10) -> list[dict]:
             for a in catalog.search(query, max(1, min(int(limit), 25)))]
 
 
-@mcp.tool(annotations=WRITE)
+@tool(WRITE)
 def add_product_to_shopping_list(ean: str, list_name: str | None = None,
                                  merge: bool = True) -> str:
     """Slå upp en streckkod (EAN/GTIN) och lägg produktens namn på en lista.
@@ -543,7 +563,7 @@ def add_product_to_shopping_list(ean: str, list_name: str | None = None,
 
 
 # --------------------------------------------------------- smarta flöden
-@mcp.tool(annotations=READ)
+@tool(READ)
 def offers_on_my_list(list_name: str | None = None,
                       store_name: str | None = None) -> dict:
     """Korsa din inköpslista mot en butiks aktuella erbjudanden — visar vilka
@@ -573,7 +593,7 @@ def offers_on_my_list(list_name: str | None = None,
             "summary": f"{len(on_sale)} vara/varor på listan har erbjudanden på {store.get('name')}"}
 
 
-@mcp.tool(annotations=WRITE)
+@tool(WRITE)
 def add_recipes_to_shopping_list(recipe_ids: list[int],
                                  list_name: str | None = None) -> str:
     """Lägg ingredienserna från FLERA recept på en lista, ihopslagna (samma
@@ -598,7 +618,7 @@ def add_recipes_to_shopping_list(recipe_ids: list[int],
             f"{_merge_note(added)}{_recipe_link_note(_only_new(res, added), items)}")
 
 
-@mcp.tool(annotations=WRITE)
+@tool(WRITE)
 def plan_dinners(count: int = 5, list_name: str | None = None,
                  store_name: str | None = None) -> dict:
     """Planera veckans middagar: hämtar `count` slumprecept (1–10), slår ihop
@@ -635,7 +655,7 @@ def plan_dinners(count: int = 5, list_name: str | None = None,
 
 def _configure_logging() -> None:
     """Logga till stderr (stdout är reserverat för MCP-protokollet!). force=True
-    eftersom FastMCP() redan har kört basicConfig vid import med sitt eget
+    eftersom MCPServer() redan har kört basicConfig vid import med sitt eget
     format — utan force blir anropet en no-op och nivå/namn försvinner."""
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, force=True,
                         format="%(levelname)s %(name)s: %(message)s")
