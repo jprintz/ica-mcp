@@ -63,6 +63,16 @@ def test_match_ignores_notes_in_brackets(catalog):
     assert catalog.match("(bara anteckning)") is None
 
 
+def test_unknown_unit_amount_in_name_still_links(catalog):
+    # aggregate_ingredients lägger okända enheter i parentes: 'lök (2 klyftor)'
+    from ica_mcp.client import IcaClient
+    r = {"ingredientGroups": [{"ingredients": [
+        {"ingredient": "lök", "quantity": 2, "unit": "klyftor", "ingredientId": 55192}]}]}
+    [it] = IcaClient.aggregate_ingredients([r])
+    assert it["name"] == "lök (2 klyftor)" and it["quantity"] is None
+    assert catalog.match(it["name"])["id"] == 10992  # namnet, inte receptets fallback-id
+
+
 @pytest.mark.parametrize("name", ["mjölkk", "krossade tomat", "lökar", "", "   ", None])
 def test_match_never_guesses(catalog, name):
     assert catalog.match(name) is None
