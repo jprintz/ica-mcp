@@ -63,8 +63,10 @@ deliberately strict:
   **exact** name (or id). An empty name, the primary list by default, or a
   partial match is refused instead of guessed. Read-only and additive tools
   keep the forgiving name matching.
-- Every tool carries MCP annotations (read-only / write / destructive), so a
-  client can ask for confirmation before the destructive ones.
+- Every tool carries full MCP annotations: a title, read-only / write /
+  destructive, whether repeating a call changes anything more (idempotent), and
+  that it talks to ICA (open world). Clients can show the titles and ask for
+  confirmation before the destructive tools.
 - Barcodes must be 8–14 digits before they are looked up.
 - Quantities and units are validated; an unknown recipe unit stays in the item
   name instead of being dropped.
