@@ -62,16 +62,27 @@ _LOG = logging.getLogger("ica_mcp")
 
 mcp = MCPServer("ICA")
 
-# MCP-etiketter så klienter vet vad verktygen gör
-READ = ToolAnnotations(read_only_hint=True)
-WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False)
-DESTRUCTIVE = ToolAnnotations(read_only_hint=False, destructive_hint=True)
+# MCP-etiketter så klienter vet vad verktygen gör. Alla verktyg pratar med ICA
+# (open world). Läsning och borttagning är idempotenta; tillägg är det inte,
+# så skrivverktyg anger idempotent=True där ett upprepat anrop inte ändrar mer.
+READ = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True,
+                       open_world_hint=True)
+WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False,
+                        open_world_hint=True)
+DESTRUCTIVE = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True,
+                              open_world_hint=True)
 
 
-def tool(annotations: ToolAnnotations):
-    """Registrera ett MCP-verktyg. IcaError blir ToolError så att agenten får
+def tool(kind: ToolAnnotations, title: str, *, idempotent: bool | None = None):
+    """Registrera ett MCP-verktyg. kind är READ/WRITE/DESTRUCTIVE, title en kort
+    rubrik som klienter visar. IcaError blir ToolError så att agenten får
     meddelandet (vad som matchade, giltiga val). mcp 2.x visar annars bara
     'Error executing tool <namn>' för andra undantag; övriga fel förblir dolda."""
+    update: dict = {"title": title}
+    if idempotent is not None:
+        update["idempotent_hint"] = idempotent
+    annotations = kind.model_copy(update=update)
+
     def register(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -195,7 +206,7 @@ class Item(BaseModel):
 
 
 # -------------------------------------------------------------------- tools
-@tool(READ)
+@tool(READ, "Visa inköpslistor")
 def list_shopping_lists() -> list[dict]:
     """Lista alla dina ICA-inköpslistor med antal varor kvar och avbockade.
     Den första listan är din primära ('Handla') och används som standard när
@@ -213,7 +224,7 @@ def list_shopping_lists() -> list[dict]:
     return out
 
 
-@tool(READ)
+@tool(READ, "Visa inköpslista")
 def view_shopping_list(list_name: str | None = None) -> dict:
     """Visa innehållet i en inköpslista. list_name matchas mot listans titel
     (utelämna för den primära listan). Returnerar varor uppdelat i kvar/avbockade."""
@@ -226,7 +237,7 @@ def view_shopping_list(list_name: str | None = None) -> dict:
             "summary": f"{len(remaining)} kvar, {len(checked)} avbockade"}
 
 
-@tool(WRITE)
+@tool(WRITE, "Lägg till varor")
 def add_items(items: list[Item], list_name: str | None = None, merge: bool = True) -> str:
     """Lägg till en eller flera varor på en inköpslista, var och en som
     {name, quantity?, unit?}, t.ex. {name: 'grädde', quantity: 2, unit: 'dl'}
@@ -251,7 +262,7 @@ def add_items(items: list[Item], list_name: str | None = None, merge: bool = Tru
     return head + _merge_note(added) + _link_note(_only_new(res, added))
 
 
-@tool(WRITE)
+@tool(WRITE, "Koppla vara till produkt", idempotent=True)
 def link_item(item: str, product_id: int | None = None, category: Category | None = None,
               list_name: str | None = None) -> str:
     """Sortera en vara som redan finns på listan, t.ex. en under Ospecificerad:
@@ -281,7 +292,7 @@ def link_item(item: str, product_id: int | None = None, category: Category | Non
     return f"'{rows[0].get('productName')}' på '{fresh.get('title')}' är nu kopplad till {where}."
 
 
-@tool(WRITE)
+@tool(WRITE, "Bocka av vara", idempotent=True)
 def check_off(item: str, list_name: str | None = None) -> str:
     """Bocka av en vara (markera som köpt/klar) på en lista."""
     c = client()
@@ -294,7 +305,7 @@ def check_off(item: str, list_name: str | None = None) -> str:
     return f"Bockade av '{rows[0].get('productName')}' på '{fresh.get('title')}'."
 
 
-@tool(WRITE)
+@tool(WRITE, "Avbocka vara", idempotent=True)
 def uncheck(item: str, list_name: str | None = None) -> str:
     """Ångra avbockning av en vara (markera som ej köpt igen)."""
     c = client()
@@ -314,7 +325,7 @@ def _resolve_destructive(c, list_name: str | None) -> dict:
     return c.resolve_list(list_name, exact=True)
 
 
-@tool(DESTRUCTIVE)
+@tool(DESTRUCTIVE, "Ta bort vara")
 def remove_item(item: str, list_name: str | None = None) -> str:
     """Ta bort en vara helt från en lista (inte samma som att bocka av).
     list_name måste vara listans exakta namn; utelämnat = primärlistan."""
@@ -326,7 +337,7 @@ def remove_item(item: str, list_name: str | None = None) -> str:
     return f"Tog bort '{rows[0].get('productName')}' från '{fresh.get('title')}'."
 
 
-@tool(DESTRUCTIVE)
+@tool(DESTRUCTIVE, "Rensa avbockade varor")
 def clear_checked(list_name: str | None = None) -> str:
     """Ta bort alla avbockade varor från en lista (rensa upp efter handling).
     list_name måste vara listans exakta namn; utelämnat = primärlistan."""
@@ -346,7 +357,7 @@ def _store_note(L: dict) -> str:
             " (utan butik: lägg till en favoritbutik i ICA-appen för att få kategorier)")
 
 
-@tool(WRITE)
+@tool(WRITE, "Skapa inköpslista")
 def create_shopping_list(title: str, store_name: str | None = None) -> str:
     """Skapa en ny inköpslista med angiven titel, kopplad till en butik (krävs
     för att ICA-appen ska visa kategorier). store_name matchas mot dina
@@ -356,7 +367,7 @@ def create_shopping_list(title: str, store_name: str | None = None) -> str:
     return f"Skapade listan '{L.get('title')}'{_store_note(L)}."
 
 
-@tool(WRITE)
+@tool(WRITE, "Välj butik för lista", idempotent=True)
 def set_list_store(list_name: str | None = None, store_name: str | None = None) -> str:
     """Koppla en befintlig inköpslista till en butik, så att ICA-appen visar
     kategorier och sorterar efter butiken. store_name matchas mot dina
@@ -380,7 +391,7 @@ def set_list_store(list_name: str | None = None, store_name: str | None = None) 
     return f"Listan '{L.get('title')}' är nu kopplad till {new} (var: {was})."
 
 
-@tool(DESTRUCTIVE)
+@tool(DESTRUCTIVE, "Radera inköpslista")
 def delete_shopping_list(list_name: str) -> str:
     """Radera en hel inköpslista. Kräver listans EXAKTA namn (eller id); tomt
     namn, primärlistan som standard och delmatchning tillåts inte."""
@@ -391,7 +402,7 @@ def delete_shopping_list(list_name: str) -> str:
 
 
 # ------------------------------------------------------------------ recept
-@tool(READ)
+@tool(READ, "Visa sparade recept")
 def list_saved_recipes(limit: int = 12) -> dict:
     """Lista dina favoritmarkerade recept (senast tillagda först). Hämtar
     detaljer per recept, så håll limit lågt (standard 12)."""
@@ -408,7 +419,7 @@ def list_saved_recipes(limit: int = 12) -> dict:
     return {"total_saved": len(refs), "showing": len(recipes), "recipes": recipes}
 
 
-@tool(READ)
+@tool(READ, "Visa recept")
 def get_recipe(recipe_id: int) -> dict:
     """Hämta ett recept: titel, tid, portioner, ingredienser (fri text) och
     tillagningssteg."""
@@ -419,7 +430,7 @@ def get_recipe(recipe_id: int) -> dict:
     return s
 
 
-@tool(READ)
+@tool(READ, "Slumpa recept")
 def random_recipes(count: int = 3) -> list[dict]:
     """Hämta slumpmässiga recept för inspiration (count 1–10)."""
     count = max(1, min(int(count), 10))
@@ -442,7 +453,7 @@ def _recipe_link_note(res: dict, items: list[dict]) -> str:
     return note
 
 
-@tool(WRITE)
+@tool(WRITE, "Lägg recept på lista")
 def add_recipe_to_shopping_list(recipe_id: int, list_name: str | None = None) -> str:
     """Lägg alla ingredienser från ett recept som varor på en inköpslista, med
     mängd och enhet (t.ex. 8 dl mjölk). I appen visas receptet under "Tillagd
@@ -463,14 +474,14 @@ def add_recipe_to_shopping_list(recipe_id: int, list_name: str | None = None) ->
 
 
 # ------------------------------------------------------ erbjudanden / butiker
-@tool(READ)
+@tool(READ, "Visa favoritbutiker")
 def list_stores() -> list[dict]:
     """Lista dina favoritbutiker (id, namn, ort). Den första är standardbutik
     för erbjudanden."""
     return client().get_favorite_stores()
 
 
-@tool(READ)
+@tool(READ, "Visa erbjudanden")
 def get_offers(store_name: str | None = None, query: str | None = None,
                limit: int = 40) -> dict:
     """Hämta aktuella erbjudanden för en butik. store_name matchas mot dina
@@ -489,7 +500,7 @@ def get_offers(store_name: str | None = None, query: str | None = None,
             "offers": offers[:max(1, int(limit))]}
 
 
-@tool(READ)
+@tool(READ, "Visa bonus")
 def get_bonus() -> dict:
     """Visa din ICA-bonus/Stammis: kupongvärde, aktiva kuponger och rabatt hittills."""
     b = client().get_bonus()
@@ -506,7 +517,7 @@ def get_bonus() -> dict:
 
 
 # ------------------------------------------------------------------ produkt
-@tool(READ)
+@tool(READ, "Slå upp produkt (streckkod)")
 def get_product(ean: str) -> dict:
     """Slå upp en produkt via streckkod (EAN/GTIN). Returnerar namn +
     artikelgrupp, eller found=False om koden inte finns."""
@@ -521,7 +532,7 @@ def get_product(ean: str) -> dict:
             "articleId": p.get("articleId"), "articleGroupId": p.get("articleGroupId")}
 
 
-@tool(READ)
+@tool(READ, "Sök produkter")
 def search_products(query: str, limit: int = 10) -> list[dict]:
     """Sök i ICA:s produktregister (generiska varor som 'mjölk', 'krossad
     tomat'). Använd för att hitta product_id när add_items inte kunde koppla en
@@ -534,7 +545,7 @@ def search_products(query: str, limit: int = 10) -> list[dict]:
             for a in catalog.search(query, max(1, min(int(limit), 25)))]
 
 
-@tool(WRITE)
+@tool(WRITE, "Lägg produkt på lista")
 def add_product_to_shopping_list(ean: str, list_name: str | None = None,
                                  merge: bool = True) -> str:
     """Slå upp en streckkod (EAN/GTIN) och lägg produktens namn på en lista.
@@ -563,7 +574,7 @@ def add_product_to_shopping_list(ean: str, list_name: str | None = None,
 
 
 # --------------------------------------------------------- smarta flöden
-@tool(READ)
+@tool(READ, "Erbjudanden på min lista")
 def offers_on_my_list(list_name: str | None = None,
                       store_name: str | None = None) -> dict:
     """Korsa din inköpslista mot en butiks aktuella erbjudanden — visar vilka
@@ -593,7 +604,7 @@ def offers_on_my_list(list_name: str | None = None,
             "summary": f"{len(on_sale)} vara/varor på listan har erbjudanden på {store.get('name')}"}
 
 
-@tool(WRITE)
+@tool(WRITE, "Lägg flera recept på lista")
 def add_recipes_to_shopping_list(recipe_ids: list[int],
                                  list_name: str | None = None) -> str:
     """Lägg ingredienserna från FLERA recept på en lista, ihopslagna (samma
@@ -618,7 +629,7 @@ def add_recipes_to_shopping_list(recipe_ids: list[int],
             f"{_merge_note(added)}{_recipe_link_note(_only_new(res, added), items)}")
 
 
-@tool(WRITE)
+@tool(WRITE, "Planera middagar")
 def plan_dinners(count: int = 5, list_name: str | None = None,
                  store_name: str | None = None) -> dict:
     """Planera veckans middagar: hämtar `count` slumprecept (1–10), slår ihop

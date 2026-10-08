@@ -138,18 +138,27 @@ READ = {"list_shopping_lists", "view_shopping_list", "list_saved_recipes", "get_
 DESTRUCTIVE = {"delete_shopping_list", "remove_item", "clear_checked"}
 
 
+# Write tools where a repeated call changes nothing more (the rest add rows/lists).
+IDEMPOTENT_WRITES = {"link_item", "check_off", "uncheck", "set_list_store"}
+
+
 def test_tool_annotations():
     tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
-    assert READ | DESTRUCTIVE <= set(tools)
+    assert READ | DESTRUCTIVE | IDEMPOTENT_WRITES <= set(tools)
     for name, t in tools.items():
         a = t.annotations
         assert a is not None, name
+        assert a.title, name
+        assert a.open_world_hint is True, name
         if name in READ:
-            assert a.read_only_hint is True, name
+            assert a.read_only_hint is True and a.destructive_hint is False, name
+            assert a.idempotent_hint is True, name
         elif name in DESTRUCTIVE:
             assert a.read_only_hint is False and a.destructive_hint is True, name
+            assert a.idempotent_hint is True, name
         else:
             assert a.read_only_hint is False and a.destructive_hint is False, name
+            assert a.idempotent_hint is (name in IDEMPOTENT_WRITES), name
 
 
 def _list_with_rows(offline_id="BBB-222", title="Fest"):
